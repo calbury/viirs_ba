@@ -3,51 +3,88 @@
 -- DROP FUNCTION viirs_threshold_2_fireevents(timestamp without time zone, interval, integer);
 
 CREATE OR REPLACE FUNCTION viirs_threshold_2_fireevents(
+    varchar(200),
     timestamp without time zone,
     interval,
     integer)
   RETURNS void AS
 $BODY$
 DECLARE 
-  collection timestamp without time zone := $1; 
-  recent interval := $2;
-  distance integer := $3; 
---   a_row active_fire_alb%rowtype;
-  a_row RECORD;
-  dumrec RECORD;
+  schema varchar(200) := $1 ;
+  collection timestamp without time zone := $2; 
+  recent interval := $3;
+  distance integer := $4; 
+  added record ; 
+  confirm_query text ; 
+  confirm_point text ; 
+  insert_confirmed text ; 
+  update_collection text;
 BEGIN
-  FOR a_row IN SELECT a.* FROM threshold_burned a  
-    WHERE collection_date = collection
-  LOOP
-  SELECT * from (SELECT fe.fid as fe_fid,
-           fe.geom, 
-           fc.fid as fc_fid
-      FROM fire_events fe, fire_collections fc
-      WHERE fe.collection_id = fc.fid 
-        AND fc.last_update >= collection - recent 
-        AND fc.last_update <= collection
-        AND fc.active = TRUE
-        AND fe.source = 'ActiveFire') as tf WHERE ST_DWithin(ST_Transform(a_row.geom, 102008), tf.geom, distance) LIMIT 1 INTO dumrec;
-  IF EXISTS (SELECT * from (SELECT fe.fid as fe_fid,
-           fe.geom, 
-           fc.fid as fc_fid
-      FROM fire_events fe, fire_collections fc
-      WHERE fe.collection_id = fc.fid 
-        AND fc.last_update >= collection - recent 
-        AND fc.last_update <= collection
-        AND fc.active = TRUE
-        AND fe.source = 'ActiveFire') as tf WHERE ST_DWithin(ST_Transform(a_row.geom, 102008), tf.geom, distance) LIMIT 1) THEN 
-    RAISE NOTICE 'found a match' ;
-    INSERT INTO fire_events(latitude, longitude, geom, source, collection_id, collection_date, pixel_size, band_i_m)
-      VALUES(a_row.latitude, a_row.longitude, ST_Multi(ST_Transform(a_row.geom, 102008)), 'Threshold', dumrec.fc_fid, a_row.collection_date, a_row.pixel_size, a_row.band_i_m);
-    UPDATE fire_collections SET last_update = a_row.collection_date
-      WHERE dumrec.fc_fid = fire_collections.fid;
-  END IF;
-  END LOOP;
-return;
+
+  RAISE NOTICE 'Interval = %', recent ;
+  
+  -- This will return one row for each confirmed "threshold_burned" point in the 
+  -- specified collection, paired with exactly one fire collection via exactly one 
+  -- fire event with a source of "ActiveFire" meeting the spatiotemporal criteria. 
+  confirm_query := 'SELECT t_fid, fe_fid, fc.fid as fc_fid ' || 
+    'FROM ' || quote_ident(schema) || '.fire_collections fc, ' ||
+               quote_ident(schema) || '.fire_events fe, ' || 
+        '(SELECT t.fid as t_fid, MAX(fe.fid) AS fe_fid ' || 
+         'FROM ' || quote_ident(schema) || '.fire_events fe, ' || 
+             quote_ident(schema) || '.fire_collections fc, ' ||
+             quote_ident(schema) || '.threshold_burned t ' ||
+         'WHERE ' ||
+             -- glue and seed criteria
+             'fe.collection_id = fc.fid AND ' || 
+             'fe.source = ' || quote_literal('ActiveFire') || ' AND ' || 
+             't.collection_date = $1 AND ' || 
+
+             -- temporal criterion
+             'fc.last_update >= $1 - $2 AND ' ||
+             'fc.last_update <= $1 AND ' || 
+
+             -- spatial criterion
+             'ST_DWithin(ST_Transform(t.geom, 102008), fe.geom, $3) ' || 
+
+        'GROUP BY t.fid) confirmed ' ||
+     'WHERE fe.fid = fe_fid AND ' ||
+        'fe.collection_id = fc.fid' ;
+
+
+
+    
+  insert_confirmed := 'INSERT INTO ' || quote_ident(schema) || '.fire_events ' ||
+      '(latitude, longitude, geom, source, collection_id, ' ||
+       'collection_date, pixel_size, band_i_m) ' ||
+      'SELECT latitude, longitude, ST_Transform(geom, 102008), ' || 
+        quote_literal('Threshold') || ', ' || 
+        'fc_fid, collection_date, pixel_size, band_i_m ' ||
+      'FROM confirmed_pts cp, ' || 
+            quote_ident(schema) || '.threshold_burned t ' ||
+      'WHERE t.fid = cp.t_fid'  ;
+
+  update_collection := 'UPDATE ' || quote_ident(schema) || '.fire_collections fc ' || 
+      'SET last_update = $1 ' || 
+      'FROM (SELECT DISTINCT fc_fid FROM confirmed_pts) foo ' || 
+      'WHERE fc.fid = fc_fid' ;
+  
+  confirm_point := 'UPDATE ' || quote_ident(schema) || '.threshold_burned t ' || 
+      'SET confirmed_burn = TRUE ' || 
+      'FROM confirmed_pts cp ' || 
+      'WHERE t.fid = cp.t_fid' ; 
+
+  EXECUTE 'CREATE TEMPORARY TABLE confirmed_pts AS ' || confirm_query
+      USING collection, recent, distance ; 
+      
+  EXECUTE 'SELECT count(*) as c FROM confirmed_pts' INTO added ; 
+
+  RAISE NOTICE 'adding % points.', added.c ; 
+  EXECUTE insert_confirmed ; 
+  EXECUTE update_collection USING collection ; 
+  EXECUTE confirm_point ;     
 END
 $BODY$
   LANGUAGE plpgsql VOLATILE
   COST 100;
-ALTER FUNCTION viirs_threshold_2_fireevents(timestamp without time zone, interval, integer)
+ALTER FUNCTION viirs_threshold_2_fireevents(varchar(200), timestamp without time zone, interval, integer)
   OWNER TO postgres;

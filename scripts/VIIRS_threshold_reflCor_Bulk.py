@@ -59,19 +59,34 @@
 
 import os
 import sys
-import shutil
 import datetime
 import glob
+import pipes
 import numpy as np
 import h5py
 import psycopg2
-import ConfigParser
 import time
-import datetime
 import gc
 import subprocess
+import viirs_config as vc
 from pyhdf.SD import SD, SDC
+from itertools import islice, chain
 
+# Friendly names for relevant projections: 
+srids = { 
+  "WGS84" : 4326,
+  "Albers" : 102008,
+  "NLCD"   : 96630
+}
+
+# batch recipe from:
+# http://code.activestate.com/recipes/303279-getting-items-in-batches/
+# used for uploading points to postgis
+def batch(iterable, size):
+    sourceiter = iter(iterable)
+    while True:
+        batchiter = islice(sourceiter, size)
+        yield chain([batchiter.next()], batchiter)
 
 
 # Prints the contents of an h5.
@@ -85,10 +100,10 @@ def id(x):
 
 
 # Write the coordinate list to text file.
-def write_coordinates2text(coordsList, fileName, date):
-    if not os.path.exists(os.path.join(BaseDir,"TextOut")):
-        os.makedirs(os.path.join(BaseDir,"TextOut"))
-    outfile = os.path.join(BaseDir, "TextOut", fileName + ".txt")
+def write_coordinates2text(config, coordsList, fileName, date):
+    if not os.path.exists(os.path.join(config.BaseDir,"TextOut")):
+        os.makedirs(os.path.join(config.BaseDir,"TextOut"))
+    outfile = os.path.join(config.BaseDir, "TextOut", fileName + ".txt")
     if os.path.exists(outfile):
         os.remove(outfile)
     
@@ -150,37 +165,57 @@ def get_coords_from_Con_array(Con, Lat, Lon):
 def h5_date_time(f):
     dt = f.split("_")[2][1:9] + f.split("_")[3][1:7]
     dt = datetime.datetime.strptime(dt, '%Y%m%d%H%M%S')
-    print datetime.datetime.strftime(dt, '%Y%m%d%H%M%S')
-    print "\n"
+    #print datetime.datetime.strftime(dt, '%Y%m%d%H%M%S')
+    #print "\n"
     return dt
+
+def postgis_conn_params(config) : 
+    if config.DBhost is None : 
+        ConnParam = "dbname={0} user={1} password={2}".format(
+           config.DBname, config.DBuser, config.pwd)
+    else : 
+        ConnParam = "host={3} dbname={0} user={1} password={2}".format(
+           config.DBname, config.DBuser, config.pwd, config.DBhost)
+    return ConnParam
 
 
 # Push the coordinates and date/time of the thresholded pixels to PostGIS
-def push_list_to_postgis(list, date, table, pSize, band):
-    print "\nPushing data to VIIRS_burned_area DB table: public." + table
+def push_list_to_postgis(config, list, date, table, pSize, band):
+    print "\nPushing data to {0} DB table: {1}.{2}".format(config.DBname, config.DBschema,table)
     format = '%Y-%m-%d %H:%M:%S'
     # Connect to VIIRS database
-    ConnParam = "dbname={0} user={1} password={2}".format(DBname, DBuser, pwd)
+    ConnParam = postgis_conn_params(config)
     conn = psycopg2.connect(ConnParam)
     # Open a cursor to perform database operations
     cur = conn.cursor()
-    #Loop through list
-    for i in list:
-        # Execute a command to insert new records into table
-        cur.execute("INSERT INTO public.%s (latitude, longitude, collection_date, geom, pixel_size, band_i_m) VALUES ('%s','%s','%s', ST_GeomFromText('POINT(%s %s)',4326),'%s','%s');"%(table, i[0], i[1], datetime.datetime.strftime(date, format), i[1], i[0],pSize,band))
-        # Make the changes to the database persistent
+    
+    #batch up the list 100 items at a time
+    for batchiter in batch(list, 100) :
+        
+        # Construct a command to insert a batch of new records into table
+        preamble = "INSERT INTO \"%s\".%s (latitude, longitude, collection_date, geom, pixel_size, band_i_m) VALUES "%(config.DBschema, table)
+        values = [ ]
+        for i in batchiter : 
+            values.append("('%s','%s','%s', ST_GeomFromText('POINT(%s %s)',4326),'%s','%s')"%
+                 (i[0], i[1], datetime.datetime.strftime(date, format), i[1], i[0],pSize,band))
+        query = "{0} {1};".format(preamble, ",".join(values))
+        
+        # Execute and commit the batch loading command.
+        cur.execute(query)
         conn.commit()
+        
     old_isolation_level = conn.isolation_level
     conn.set_isolation_level(0)
-    cur.execute("VACUUM ANALYZE %s;"%(table)) 
+    cur.execute("VACUUM ANALYZE \"%s\".%s;"%(config.DBschema, table)) 
     conn.set_isolation_level(old_isolation_level)
     conn.commit()
     # Close communication with the database
     cur.close()
     conn.close()
-def execute_query(queryText):
+    
+def execute_query(config, queryText):
     print "Start", queryText, get_time()
-    ConnParam = "dbname={0} user={1} password={2}".format(DBname, DBuser, pwd)
+    ConnParam = postgis_conn_params(config)
     conn = psycopg2.connect(ConnParam)
     # Open a cursor to perform database operations
     cur = conn.cursor()
@@ -190,42 +225,58 @@ def execute_query(queryText):
     cur.close()
     conn.close()
     print "End", queryText, get_time()
+
+def execute_sql_file(config, filename):
+    print "Start", get_time()
+
+    command = 'psql -h {0} -U {1} -d {2} -f {3}'.format(
+        config.DBhost,
+        config.DBuser,
+        config.DBname,
+        filename)
+    env = os.environ.copy()
+    env['PGPASSWORD'] = config.pwd
+    print command
+    subprocess.call(command, shell=True, env=env)
+
+    print "End", get_time()
+
+  
+def execute_check_4_activity(config, collectionDate):
+    query_text = "SELECT viirs_check_4_activity('{0}', '{1}', '{2}');".format(config.DBschema, collectionDate, config.get_sql_interval())
+    execute_query(config,query_text)
  
-def execute_check_4_activity(collectionDate, interval):
-    query_text = "SELECT viirs_check_4_activity(\'{0}\', \'{1}\');".format(collectionDate, interval)
-    execute_query(query_text)
- 
-def execute_active_fire_2_events(collectionDate, interval, distance):
+def execute_active_fire_2_events(config, collectionDate):
     print "Start active_fire to fire_events", get_time()
-    query_text = "SELECT VIIRS_activefire_2_fireevents(\'{0}\', \'{1}\', {2});".format(collectionDate, interval, distance)
-    execute_query(query_text)
+    query_text = "SELECT VIIRS_activefire_2_fireevents('{0}', '{1}', '{2}', {3});".format(config.DBschema, collectionDate, config.get_sql_interval(), config.SpatialProximity)
+    execute_query(config,query_text)
 
-def execute_threshold_2_events(collectionDate, interval, distance):
+def execute_threshold_2_events(config, collectionDate):
     print "Start VIIRS_threshold_2_fireevents", get_time()
-    query_text = "SELECT VIIRS_threshold_2_fireevents(\'{0}\', \'{1}\', {2});".format(collectionDate, interval, distance)
-    execute_query(query_text)
+    query_text = "SELECT VIIRS_threshold_2_fireevents('{0}', '{1}', '{2}', {3});".format(config.DBschema, collectionDate, config.get_sql_interval(), config.SpatialProximity)
+    execute_query(config,query_text)
 
-def execute_simple_confirm_burns(collectionDate, interval, distance):
+def execute_simple_confirm_burns(config, collectionDate):
     print "Start threshold_burned to fire_events", get_time()
-    query_text = "SELECT VIIRS_simple_confirm_burns(\'{0}\', \'{1}\', {2});".format(collectionDate, interval, distance)
-    execute_query(query_text)
+    query_text = "SELECT VIIRS_simple_confirm_burns('{0}', '{1}', '{2}', {3});".format(config.DBschema, collectionDate, config.get_sql_interval(), config.SpatialProximity)
+    execute_query(config,query_text)
 
  
 # def execute_copy_threshold_burned_2_fire_events(collectionDate):
     # print "Copying confimed burned to fire events for:", collectionDate
     # query_text = "SELECT copy_threshold_burned_2_fireevents(\'{0}\');".format(collectionDate)
-    # execute_query(query_text)
+    # execute_query(config, query_text)
     
 # def execute_copy_active_fire_2_fire_events(collectionDate):
     # print "Copying active fire to fire events for:", collectionDate
     # query_text = "SELECT copy_activefire_2_fireevents(\'{0}\');".format(collectionDate)
-    # execute_query(query_text)
+    # execute_query(config,query_text)
     
-def vacuum_analyze(table):
-    print "Start Vacuum {0}".format(table), get_time()
-    query_text = "VACUUM ANALYZE {0}".format(table) 
+def vacuum_analyze(config, table):
+    print "Start Vacuum {0}.{1}".format(config.DBschema, table), get_time()
+    query_text = "VACUUM ANALYZE \"{0}\".{1}".format(config.DBschema, table) 
     # Connect to VIIRS database
-    ConnParam = "dbname={0} user={1} password={2}".format(DBname, DBuser, pwd)
+    ConnParam = postgis_conn_params(config)
     conn = psycopg2.connect(ConnParam)
     old_isolation_level = conn.isolation_level
     conn.set_isolation_level(0)
@@ -239,197 +290,460 @@ def vacuum_analyze(table):
     conn.close()
     print "End Vacuum {0}".format(table), get_time(), "\n"
 
+def initialize_schema_for_postgis(config) : 
+    """create the schema to hold outputs, populate with empty tables"""
+    query_text = "SELECT init_schema('{0}')".format(config.DBschema)
+    execute_query(config,query_text)
+    
+
 def get_time():
     ts = time.time()
     dt = datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
     return dt
-    
-    
 
-def run():
-    # Define threshold values.
-#    Thresholds = {
-#        "M07UB" : 1800,     #Band 07 (0.86 um)upper bound
-#        "M08LB" : 500,      #Band 08 (1.24 um)lower bound
-#        "M08UB" : 2000,     #Band 08 (1.24 um)upper bound
-#        "M10LB" : 1000,     #Band 10 (1.61 um)lower bound
-#        "M10UB" : 10000,    #Band 10 (1.61 um)upper bound
-#        "M11LB" : 500,      #Band 11 (2.25 um)lower bound
-#        "RthSub" : 500,     #RthSub is the factor subtracted from the 1.240 band when comparing to the Rth
-#        "Rth" : 8000,       #Rth
-#        "RthLB": 0          #RthLB is the factor that the Rth check must be less than or equal to
-#        }
+def output_shape_files(config) : 
+    """produces the shapefile products in the specified output folder"""
+
+    if not os.path.exists(config.ShapePath):
+        os.makedirs(config.ShapePath)
+
+    print "Exporting to point shapefile:"
+    Pgsql2shpExe = os.path.join(config.PostBin, "pgsql2shp")
+    shp = config.ShapePath + '/' + 'fire_collection_point_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S')    
+
+    query = 'SELECT a.*, b.fid as col_id, b.active FROM "{0}".fire_events a, "{0}".fire_collections b WHERE a.collection_id = b.fid;'.format(config.DBschema)
+    if config.DBhost is None : 
+        command =  '{0} -f {1} -h localhost -u {2} -P {3} -g geom {4} {5}'.format(pipes.quote(Pgsql2shpExe), shp, config.DBuser, config.pwd, config.DBname, pipes.quote(query))
+    else : 
+        command =  '{0} -f {1} -h {6} -u {2} -P {3} -g geom {4} {5}'.format(pipes.quote(Pgsql2shpExe), shp, config.DBuser, config.pwd, config.DBname, pipes.quote(query), config.DBhost)
+            
+    print command
+    subprocess.call(command, shell = True)
+
+    print "Exporting to polygon shapefile:"
+    shp = config.ShapePath + '/' + 'fire_collection_poly_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S')    
+    query = 'SELECT ST_Multi(ST_Union(ST_Expand(geom, 375))) as geom, collection_id FROM "{0}".fire_events GROUP BY collection_id;'.format(config.DBschema)
+
+    if config.DBhost is None : 
+        command =  '{0} -f {1} -h localhost -u {2} -P {3} {4} {5}'.format(pipes.quote(Pgsql2shpExe), shp, config.DBuser, config.pwd, config.DBname, pipes.quote(query))
+    else : 
+        command =  '{0} -f {1} -h {6} -u {2} -P {3} {4} {5}'.format(pipes.quote(Pgsql2shpExe), shp, config.DBuser, config.pwd, config.DBname, pipes.quote(query), config.DBhost)
+    print command
+    subprocess.call(command, shell = True)
+
+def ba_threshold(config, m07, m08, m10, m11, af, geo) :
+    """perform the thresholding and return a conditional array representing a mask of 
+    burned area detections."""
+    M07ReflArray = m07.get_cor_refl()
+    M08ReflArray = m08.get_cor_refl()
+    M10ReflArray = m10.get_cor_refl()
+    M11ReflArray = m11.get_cor_refl()
+ 
+    # Set up Burned Area Conditional array: BaCon
+    print "Thresholding"
+    BaCon = np.zeros_like(M07ReflArray, dtype=np.bool)
+        
+    # Threshold bands
+    # Cast any pixels as one that meet the thresholds.
+    # I'm getting a divide by zero warning here that I am catching with
+    # the "np.where" but I'm still getting it, however I'm pretty confident that
+    # the catch is working properly.
+    BaCon[
+        (M07ReflArray < config.M07UB) &
+        (M08ReflArray > config.M08LB) &
+        (M08ReflArray < config.M08UB) &
+        (M10ReflArray > config.M10LB) &
+        (M10ReflArray < config.M10UB) &
+        (M11ReflArray > config.M11LB) &
+        (np.where(M11ReflArray != 0,((M08ReflArray-config.RthSub)/M11ReflArray),config.RthLB-1) >= config.RthLB) &
+        (np.where(M11ReflArray != 0,((M08ReflArray-config.RthSub)/M11ReflArray),config.Rth+1) < config.Rth) &
+        (af.get_non_fire()) &
+        (geo.day_pixels(config.MaxSolZen)) &   #this should supress night pixels
+        m07.qa & m08.qa & m10.qa & m11.qa
+        ] = 1
+        
+    return BaCon
+
+
+class FileSet (object) : 
+    """Represents a set of files containing satellite data from the same scene.
+    Collects filenames only, and associates them with a common date.
+    """
+        
+    @classmethod
+    def from_imagedate(cls, imagedate_str) : 
+        target=cls()
+        target.ImageDate = imagedate_str
+        return target
+
+    @classmethod
+    def from_date(cls, dt) : 
+        """creates a new fileset object from a datetime object"""
+        target = cls() 
+        target._dt = dt
+        return target
+                
+    @classmethod
+    def parse_filename(cls, filename) : 
+        """given a filename that matches the expected pattern, compute and 
+        return a FileSet object."""
+        dt = filename.split("_")[2][1:9] + f.split("_")[3][1:7]
+        dt = datetime.datetime.strptime(dt, '%Y%m%d%H%M%S')
+        return cls.from_date(dt)
+        
+        
+    def get_datetime(self) :
+        """compute and return the datetime object associated with this file set.""" 
+        # pattern:
+        # d20140715_t1921193,
+        if not hasattr(self, '_dt') : 
+            components = self.ImageDate.split("_")
+            dt = components[0][1:] + components[1][1:-1]
+            self._dt = datetime.datetime.strptime(dt, '%Y%m%d%H%M%S')
+        return self._dt
+        
+    def get_out_date(self) : 
+        """a formatted date string to include in output file names"""
+        if not hasattr(self, "_out_date")  :
+            self._out_date = datetime.datetime.strftime(self.get_datetime(), 
+                                                       "%Y%m%d_%H%M%S")
+                                                       
+        return self._out_date
+
+        
+    def get_sql_date(self) : 
+        """compute and return the SQL formatted date string associated with 
+        this file set."""
+        if not hasattr(self,"_date_4db") : 
+            self._date_4db = datetime.datetime.strftime(self.get_datetime(), 
+                     "%Y-%m-%d %H:%M:%S")
+        return self._date_4db
+        
+    def get_imagedate(self) : 
+        if not hasattr(self,"ImageDate") : 
+            self.ImageDate = "d{0:%Y%m%d}_t{0:%H%M%S}".format(self._dt)
+        return self.ImageDate
+        
+    def find_hdf_file(self, basedir, prefix,extension="h5") : 
+        """locates an hdf4/5 file in the basedir having a specific prefix,
+        returns the full pathname to the file"""
+        h5 = glob.glob(os.path.join(basedir, 
+           "{0}_{1}_e???????_b00001_c????????????????????_all-_dev.{2}".format(
+              prefix,self.get_imagedate(), extension)))[0]
+        return h5
+        
+    def get_file_names(self, basedir) : 
+        """attempt to locate all files in this set, return a dictionary of filenames"""
+        if not hasattr(self, "_filenames") : 
+            self._filenames = {} 
+            fileset = [ ("SVM07_npp", 'h5') , 
+                        ("SVM08_npp", 'h5') , 
+                        ("SVM10_npp", 'h5') , 
+                        ("SVM11_npp", 'h5') , 
+                        ("GMTCO_npp", 'h5') , 
+                        ("GITCO_npp", 'h5') ,
+                        ("VF375_npp", 'hdf'),
+                        ("AVAFO_npp", 'h5') ]
+                        
+            for pre, ext in fileset :
+                try : 
+                    self._filenames[pre] = self.find_hdf_file(basedir, pre, ext)
+                except : 
+                    pass
+            
+        return self._filenames
+        
+class ReflectanceFile(object) : 
+    """A reflectance file contains calibrated data and correction factors to
+    express this data in terms of top of the atmosphere effective reflectance.
+    This is currently a placeholder for anything which might be found to be common 
+    between MODIS and VIIRS."""
+    pass 
+    
+class VIIRSReflectanceFile (ReflectanceFile) : 
+    """Handles the VIIRS-specific reflectance data"""
+    
+    datasets = {
+        "SVM07_npp" : 'All_Data/VIIRS-M7-SDR_All/Reflectance',
+        "SVM08_npp" : 'All_Data/VIIRS-M8-SDR_All/Reflectance',
+        "SVM10_npp" : 'All_Data/VIIRS-M10-SDR_All/Reflectance',
+        "SVM11_npp" : 'All_Data/VIIRS-M11-SDR_All/Reflectance',
+    }
+    
+    cor_factors = {
+        "SVM07_npp" : 'All_Data/VIIRS-M7-SDR_All/ReflectanceFactors',
+        "SVM08_npp" : 'All_Data/VIIRS-M8-SDR_All/ReflectanceFactors',
+        "SVM10_npp" : 'All_Data/VIIRS-M10-SDR_All/ReflectanceFactors',
+        "SVM11_npp" : 'All_Data/VIIRS-M11-SDR_All/ReflectanceFactors'
+    }
+                       
+
+    @classmethod
+    def load(cls, filename, band) : 
+        """loads data from filename and returns a new object.
+        User must specify the type of file (band name, used as keys in the 
+        class dictionaries "datasets" and "cor_factors"). """
+        target = cls()
+        hdf = h5py.File(filename, "r")
+        target.ReflArray = hdf[cls.datasets[band]][:]
+        target.ReflFact = hdf[cls.cor_factors[band]][:]
+        target.corrected = False
+        target._calc_qa_mask()
+        return target
+
+    def _calc_qa_mask(self) : 
+        """produces a mask of true values where data quality is good.
+        Must be performed on raw data (prior to calling get_cor_refl). Not intended
+        for end-user use, only for use by load().""" 
+        self.qa = (self.ReflArray < 65528)
+                
+    def get_cor_refl(self) : 
+        """calculates (if necessary) and returns the corrected reflectance.
+        Note this modifies the values in this object's ReflArray."""
+        if not self.corrected : 
+            self.ReflArray = self.ReflArray*self.ReflFact[0]  + self.ReflFact[1]
+            self.corrected = True
+        return self.ReflArray
+     
+
+
+class GeoFile(object) :
+    """A geofile can apply a geographic window and produce a list of lat/lon
+    values associated with confirmed values"""
+    
+    def apply_window(self, config, confirmed) : 
+        """applies a geographic window specified in the config to the confirmed array
+        Note that the confirmed array must be the same shape as this object's 
+        latitude and longitude arrays."""
+        if config.has_window() : 
+            confirmed[
+                (self.LatArray > config.north) | 
+                (self.LatArray < config.south) | 
+                (self.LonArray < config.west) | 
+                (self.LonArray > config.east)
+            ] = 0
+            
+    def make_list(self, confirmed) : 
+        """produces a list of tuples containing the lat/lon coordinates
+        corresponding to true values in the confirmed mask.
+        This will only be successful if the confirmed array and the Lat/LonArrays
+        are related."""
+        idx = np.where(confirmed == 1) 
+        return zip(self.LatArray[idx],self.LonArray[idx])
+        
+    def day_pixels(self, zenith) : 
+        """given a specified solar zenith angle defining "sundown", returns 
+        where the day pixels are"""
+        return self.SolZen < zenith
+        
+
+
+class GeoFile750(GeoFile) : 
+    def __init__(self) :
+        self.pixel_size = 750
+        self.band_i_m   = 'm'
+        
+    @classmethod
+    def load(cls,filename) : 
+        target = cls()
+        GeoHdf = h5py.File(filename,"r")
+        target.LatArray = GeoHdf['All_Data/VIIRS-MOD-GEO-TC_All/Latitude'][:]
+        target.LonArray = GeoHdf['All_Data/VIIRS-MOD-GEO-TC_All/Longitude'][:]
+        target.SolZen = GeoHdf['All_Data/VIIRS-MOD-GEO-TC_All/SolarZenithAngle'][:]
+        return target 
+        
+class GeoFile375(GeoFile) : 
+    def __init__(self) : 
+        self.pixel_size = 375
+        self.band_i_m   = 'i'
+    
+    @classmethod
+    def load(cls, filename) :
+        target = cls()
+        GeoHdf = h5py.File(filename,"r")
+        target.LatArray = GeoHdf['All_Data/VIIRS-IMG-GEO-TC_All/Latitude'][:]
+        target.LonArray = GeoHdf['All_Data/VIIRS-IMG-GEO-TC_All/Longitude'][:]
+        return target
+
+        
+    
+class ActiveFire(object) :
+    """Encapsulates ActiveFire data, regardless of resolution"""
+    
+    # AfArray codes (these apply to I and M bands )):
+    # 0 = missing input data
+    # 1 = not processed (obsolete)
+    # 2 = not processed (obsolete)
+    # 3 = water
+    # 4 = cloud
+    # 5 = non-fire
+    # 6 = unknown
+    # 7 = fire (low confidence)
+    # 8 = fire (nominal confidence)
+    # 9 = fire (high confidence)
+    # FILL VALUES: NA_UINT8_FILL = 255
+    # MISS_UINT8_FILL = 254
+    # ONBOARD_PT_UINT8_FILL = 253
+    # ONGROUND_PT_UINT8_FILL = 252
+    # ERR_UINT8_FILL = 251
+    # ELLIPSOID_UINT8_FILL = 250
+    # VDNE_UINT8_FILL = 249
+    # SOUB_UINT8_FILL = 248
+
+    def get_conditional(self) : 
+        """computes if necessary and returns the "conditional" array for this object""" 
+        if not hasattr(self, 'conditional') : 
+            self.conditional = np.zeros_like(self.AfArray)
+
+            self.conditional[
+                (self.AfArray >= 7) &
+                (self.AfArray <= 9)
+                ] = 1
+        return self.conditional
+        
+    def filter_conditional(self, con, val) : 
+        """sets con to false wherever AfArray == val."""
+        idx = np.where(self.AfArray == val)
+        con[idx] = 0 
+
+    def get_non_fire(self) : 
+        return (self.AfArray == 5)
+        
+    def get_indices(self, con=None) : 
+        """retrieves a list of indices into the con array.
+        first list is row indices, second list is column. They are paired"""
+        if con is None:  
+            con = self.get_conditional()
+        return np.where(con == 1)
+
+    def get_array_vals(self, conditional=None) : 
+        """retrieves the array values specified by the conditional parameter"""
+	if conditional is None : 
+            conditional = self.get_conditional()
+
+        idx = np.where(conditional == 1)
+        return self.AfArray[idx]
+    
+    
+class ActiveFire750 (ActiveFire) : 
+    def __init__(self) : 
+        self.pixel_size = 750
+        self.band_i_m = 'm'
+
+    @classmethod
+    def load(cls, filename) :
+        """Reads in a 750m VIIRS HDF 5 file from disk."""
+        target = cls()  
+        target._AfHdf = h5py.File(filename, "r")
+        target.AfArray = target._AfHdf['All_Data/VIIRS-AF-EDR_All/fireMask'][:]
+        target.AfDateTime = h5_date_time(os.path.basename(filename))
+        return target
+        
+    
+class ActiveFire375 (ActiveFire) : 
+    def __init__(self) : 
+        self.pixel_size = 375
+        self.band_i_m = 'i'
+        
+    @classmethod
+    def load(cls, filename) :
+        """Reads in a 375m VIIRS HDF4 file from disk."""
+        target = cls() 
+        target._AF375hdf = SD(filename, SDC.READ)
+        target._AF375_fm = target._AF375hdf.select('fire mask')
+        target.AfArray = target._AF375_fm[:]
+        target.AfDateTime = h5_date_time(os.path.basename(filename))
+        return target
+
+        
+    def count_high_confidence(self) : 
+        """counts the number of high confidence pixels by row"""
+        if not hasattr(self, "high_conf_row_sum") : 
+            high_conf = (self.AfArray == 9)
+            self.high_conf_row_sum = np.sum(high_conf, 1)
+        return self.high_conf_row_sum
+
+    def recode_high_confidence(self, threshold=50, recode_val=10) : 
+        """if there are more than 'threshold' high confidence pixels in a row,
+           recode them to recode_val"""
+           
+        row_sums = self.count_high_confidence()
+        rows = np.where(row_sums > threshold)
+        
+        # recode, one row at a time
+        for i_row in rows : 
+            cols = self.AfArray[i_row,:]
+            cols[np.where(cols == 9)] = recode_val
+            self.AfArray[i_row, :] = cols
+
+    def get_conditional(self, threshold=None, recode_val=10) :
+        """gets all the fire points, but also flags suspicious pixels with recode_val
+        Set "threshold" to the number of high confidence pixels in a single row
+        which is considered suspicious. If threshold is None, the recoding is 
+        skipped."""
+        con = super(ActiveFire375, self).get_conditional()
+        if threshold is not None : 
+            self.recode_high_confidence(threshold, recode_val)                    
+        return con
+
+def run(config):
+    
+    if config.DatabaseOut == "y":
+        initialize_schema_for_postgis(config)
 
     #Loop through BaseDir, look for h5s and load arrays
     count = 0
     start_group = datetime.datetime.now()
-    for ImageDate in ImageDates:
+    for ImageDate in config.SortedImageDates:
         start_indiviudal = datetime.datetime.now()
         count  = count + 1
-        print "Processing number:", count, "of:", len(ImageDates)
+        print "Processing number:", count, "of:", len(config.SortedImageDates)
         print ImageDate + '\n'
-        #Read band 7
-        h5 = glob.glob(os.path.join(BaseDir, "SVM07_npp_" + ImageDate + "_e???????_b00001_c????????????????????_all-_dev.h5"))[0]
-        print "Reading band 07:", os.path.basename(h5)
         
-        M07Hdf = h5py.File(h5, "r")
-        M07ReflArray = M07Hdf['All_Data/VIIRS-M7-SDR_All/Reflectance'][:]
-        M07ReflFact = M07Hdf['All_Data/VIIRS-M7-SDR_All/ReflectanceFactors'][:]
+        fileset = FileSet.from_imagedate(ImageDate)
+        files = fileset.get_file_names(config.BaseDir)
 
-        # Read band 8
-        h5 = glob.glob(os.path.join(BaseDir, "SVM08_npp_" + ImageDate + "_e???????_b00001_c????????????????????_all-_dev.h5"))[0]
-        print "Reading band 08:", os.path.basename(h5)
-        M08Hdf = h5py.File(h5, "r")
-        M08ReflArray = M08Hdf['All_Data/VIIRS-M8-SDR_All/Reflectance'][:]
-        M08ReflFact = M08Hdf['All_Data/VIIRS-M8-SDR_All/ReflectanceFactors'][:]
-
-        # Read band 10
-        h5 = glob.glob(os.path.join(BaseDir, "SVM10_npp_" + ImageDate + "_e???????_b00001_c????????????????????_all-_dev.h5"))[0]
-        print "Reading band 10:", os.path.basename(h5)
-        M10Hdf = h5py.File(h5, "r")
-        M10ReflArray = M10Hdf['All_Data/VIIRS-M10-SDR_All/Reflectance'][:]
-        M10ReflFact = M10Hdf['All_Data/VIIRS-M10-SDR_All/ReflectanceFactors'][:]
-
-        # Read band 11
-        h5 = glob.glob(os.path.join(BaseDir, "SVM11_npp_" + ImageDate + "_e???????_b00001_c????????????????????_all-_dev.h5"))[0]
-        print "Reading band 11:", os.path.basename(h5)
-        M11Hdf = h5py.File(h5, "r")
-        M11ReflArray = M11Hdf['All_Data/VIIRS-M11-SDR_All/Reflectance'][:]
-        M11ReflFact = M11Hdf['All_Data/VIIRS-M11-SDR_All/ReflectanceFactors'][:]
+        # load the reflectance data from the hdf files
+        m07 = VIIRSReflectanceFile.load(files['SVM07_npp'],'SVM07_npp')     
+        m08 = VIIRSReflectanceFile.load(files['SVM08_npp'],'SVM08_npp')     
+        m10 = VIIRSReflectanceFile.load(files['SVM10_npp'],'SVM10_npp')     
+        m11 = VIIRSReflectanceFile.load(files['SVM11_npp'],'SVM11_npp')     
 
         # Read GMTCO
-        h5 = glob.glob(os.path.join(BaseDir, "GMTCO_npp_" + ImageDate + "_e???????_b00001_c????????????????????_all-_dev.h5"))[0]
-        print "Reading GMTCO Latitude and Longitude:", os.path.basename(h5)
-        GeoHdf = h5py.File(h5,"r")
-        LatArray = GeoHdf['All_Data/VIIRS-MOD-GEO-TC_All/Latitude'][:]
-        LonArray = GeoHdf['All_Data/VIIRS-MOD-GEO-TC_All/Longitude'][:]
-        print "Reading GMTCO Solar Zenith:", os.path.basename(h5)
-        SolZen750 = GeoHdf['All_Data/VIIRS-MOD-GEO-TC_All/SolarZenithAngle'][:]
+        geo_750 = GeoFile750.load(files['GMTCO_npp'])
         
-        if use375af.lower() == "y":
+        if config.use375af.lower() == "y":
             # Read GITCO
-            h5 = glob.glob(os.path.join(BaseDir, "GITCO_npp_" + ImageDate + "_e???????_b00001_c????????????????????_all-_dev.h5"))[0]
-            print "Reading GITCO Latitude and Longitude:", os.path.basename(h5)
-            GeoHdf = h5py.File(h5,"r")
-            Lat375Array = GeoHdf['All_Data/VIIRS-IMG-GEO-TC_All/Latitude'][:]
-            Lon375Array = GeoHdf['All_Data/VIIRS-IMG-GEO-TC_All/Longitude'][:]
-            print "Reading GITCO Solar Zenith:", os.path.basename(h5)
-            #SolZen375 = GeoHdf['All_Data/VIIRS-IMG-GEO-TC_All/SolarZenithAngle'][:]
+            geo_375 = GeoFile375.load(files['GITCO_npp'])
             
             # Read VF375
-            h4 = glob.glob(os.path.join(BaseDir, "VF375_npp_" + ImageDate + "_e???????_b00001_c????????????????????_all-_dev.hdf"))[0]
-            print "Reading VF375:", os.path.basename(h5)
-            AF375hdf = SD(h4, SDC.READ)
-            AF375_fm = AF375hdf.select('fire mask')
-            Af375Array = AF375_fm[:]
-            Af375DateTime = h5_date_time(os.path.basename(h4))
+            af_375 = ActiveFire375.load(files['VF375_npp'])
         
         # Read AVAFO
-        h5 = glob.glob(os.path.join(BaseDir, "AVAFO_npp_" + ImageDate + "_e???????_b00001_c????????????????????_all-_dev.h5"))[0]
-        print "Reading AFAFO:", os.path.basename(h5)
-        AfHdf = h5py.File(h5, "r")
-        AfArray = AfHdf['All_Data/VIIRS-AF-EDR_All/fireMask'][:]
-        AfDateTime = h5_date_time(os.path.basename(h5))
-                # AfArray codes (these apply to I and M bands )):
-                # 0 = missing input data
-                # 1 = not processed (obsolete)
-                # 2 = not processed (obsolete)
-                # 3 = water
-                # 4 = cloud
-                # 5 = non-fire
-                # 6 = unknown
-                # 7 = fire (low confidence)
-                # 8 = fire (nominal confidence)
-                # 9 = fire (high confidence)
-                # FILL VALUES: NA_UINT8_FILL = 255
-                # MISS_UINT8_FILL = 254
-                # ONBOARD_PT_UINT8_FILL = 253
-                # ONGROUND_PT_UINT8_FILL = 252
-                # ERR_UINT8_FILL = 251
-                # ELLIPSOID_UINT8_FILL = 250
-                # VDNE_UINT8_FILL = 249
-                # SOUB_UINT8_FILL = 248
-    
-    
-        H5Date = h5_date_time(os.path.basename(h5))
-        H5DateStr = datetime.datetime.strftime(H5Date, "%Y%m%d_%H%M%S")
-        # Print h5 contents
-        ##GeoHdf.visit(print_name)
-        ##M08Hdf.visit(print_name)
-        
-        # Correct reflectance values by applying scale factors
-        M07ReflArray = M07ReflArray*M07ReflFact[0] + M07ReflFact[1]
-        M08ReflArray = M08ReflArray*M08ReflFact[0] + M08ReflFact[1]
-        M10ReflArray = M10ReflArray*M10ReflFact[0] + M10ReflFact[1]
-        M11ReflArray = M11ReflArray*M11ReflFact[0] + M11ReflFact[1]
+        af_750 = ActiveFire750.load(files['AVAFO_npp'])            
         
         # Set up Burned Area Conditional array: BaCon
-        print "Thresholding"
-        BaCon = np.zeros_like(M07ReflArray)
-        
-        # Threshold bands
-        # Cast any pixels as one that meet the thresholds.
-        # I'm getting a divide by zero warning here that I am catching with
-        # the "np.where" but I'm still getting it, however I'm pretty confident that
-        # the catch is working properly.
-        BaCon[
-            (M07ReflArray < M07UB) &
-            (M08ReflArray > M08LB) &
-            (M08ReflArray < M08UB) &
-            (M10ReflArray > M10LB) &
-            (M10ReflArray < M10UB) &
-            (M11ReflArray > M11LB) &
-            (np.where(M11ReflArray != 0,((M08ReflArray-RthSub)/M11ReflArray),RthLB-1) >= RthLB) &
-            (np.where(M11ReflArray != 0,((M08ReflArray-RthSub)/M11ReflArray),Rth+1) < Rth) &
-            (AfArray == 5) &
-            (SolZen750 < MaxSolZen) &   #this should supress nigth pixels
-            ((M07ReflArray - M07ReflFact[1])/M07ReflFact[0] < 65528) &
-            ((M08ReflArray - M08ReflFact[1])/M08ReflFact[0] < 65528) &
-            ((M10ReflArray - M10ReflFact[1])/M10ReflFact[0] < 65528) &
-            ((M11ReflArray - M11ReflFact[1])/M11ReflFact[0] < 65528)
-            ] = 1
-    
-        # Clean up arrays
-        M07ReflArray = None
-        M08ReflArray = None
-        M10ReflArray = None
-        M11ReflArray = None
-        M07ReflFact = None
-        M08ReflFact = None
-        M10ReflFact = None
-        M11ReflFact = None
-        SolZen750 = None
-        del M07ReflArray
-        del M08ReflArray
-        del M10ReflArray
-        del M11ReflArray
-        del M07ReflFact
-        del M08ReflFact
-        del M10ReflFact
-        del M11ReflFact
-        del SolZen750
-            
-        
+        BaCon = ba_threshold(config, m07, m08, m10, m11, af_750, geo_750)
+
+        # Apply geographic window, if specified
+        geo_750.apply_window(config,BaCon)
+                        
         # Get Burned area coordinates as an array
-        BaLatLons = get_coords_from_Con_array(BaCon, LatArray, LonArray)
+        BaOut_list = geo_750.make_list(BaCon)
         # Clean up arrays
         BaCon = None
         del BaCon
         
-        # Convert Burned area coordinates array to a list
-        BaOut_list = array2list(BaLatLons)
-        # Clean up arrays
-        BaLatLons = None
-        del BaLatLons
-        
         # Burned area output to text
-        if TextOut == "y":
-            write_coordinates2text(BaOut_list, "BaOut_" + H5DateStr, H5Date)
+        if config.TextOut == "y":
+            write_coordinates2text(config, BaOut_list, 
+                 "BaOut_" + fileset.get_out_date(), fileset.get_datetime())
 
         # Burned area output to PostGIS 
-        if DatabaseOut == "y":
-            push_list_to_postgis(BaOut_list, H5Date, "threshold_burned", "750", "m")
-            vacuum_analyze("threshold_burned")
+        if config.DatabaseOut == "y":
+            push_list_to_postgis(config, BaOut_list, 
+                 fileset.get_datetime(), "threshold_burned", "750", "m")
+            #vacuum_analyze(config,"threshold_burned")
     
             # Clean up arrays
         BaOut_list = None
@@ -442,24 +756,20 @@ def run():
         # Begin Active Fire
         # #######################################################################
         
-        if use750af.lower() == "y":
+        if config.use750af == "y":
             # #######################################################################
             # Begin 750-m Active Fire
             # #######################################################################
             
             #Set up Active Fire Conditional array: AfCon
-            AfCon = np.zeros_like(AfArray)
-            
-            # Get the coordinates of any active fire pixels using a the same method as 
-            # the burned area. 
-            # Cast any pixels as one that are active fire
-            AfCon[
-                (AfArray >= 7) &
-                (AfArray <= 9)
-                ] = 1
+            AfCon = af_750.get_conditional()
+                            
+            # Apply geographic window, if specified
+            geo_750.apply_window(config, AfCon)
                 
-            # Get coordinates of all active fire pixels    
-            AfLatLons = get_coords_from_Con_array(AfCon, LatArray, LonArray)
+            # Get coordinates of all active fire pixels 
+            AfLatLons = geo_750.make_list(AfCon)  
+             
             # Clean up arrays
             AfCon = None
             del AfCon
@@ -470,142 +780,117 @@ def run():
             del AfLatLons
         
         
-        if use375af.lower() == "y":
+        if config.use375af == "y":
             # #######################################################################
             # Begin 375-m Active Fire
             # #######################################################################
             
             #Set up Active Fire Conditional array: AfCon
-            AfCon = np.zeros_like(Af375Array)
-            # Get the coordinates of any active fire pixels using a the same method as 
-            # the burned area. 
-            # Cast any pixels as one that are active fire
-            AfCon[
-                (Af375Array >= 7) &
-                (Af375Array <= 9)
-                ] = 1
+            #filter out rows having more than limit375 high confidence
+            #points
+            AfCon = af_375.get_conditional(
+                        threshold=getattr(config, "limit375", None),
+                        recode_val=10)
+            af_375.filter_conditional(AfCon, 10)
             
-            # Get coordinates of all active fire pixels    
-            Af375LatLons = get_coords_from_Con_array(AfCon, Lat375Array, Lon375Array)
+            # Apply geographic window, if specified
+            geo_375.apply_window(config, AfCon)
+                
+            # Get coordinates of all active fire pixels 
+            Af375Out_list = geo_375.make_list(AfCon) 
+              
             # Clean up arrays
             AfCon = None
             del AfCon
             
-            # Convert coordinate array to list
-            Af375Out_list = array2list(Af375LatLons)
-            # Clean up arrays
-            Af375LatLons = None
-            del Af375LatLons
-        if TextOut == "y":
-            if use750af.lower() == "y":  
+        if config.TextOut == "y":
+            if config.use750af == "y":  
                 # Write active fire 750 coordinates to text
-                write_coordinates2text(AfOut_list, "AfOut_" + H5DateStr, H5Date)
-            if use375af.lower() == "y":    
+                write_coordinates2text(config, AfOut_list, 
+                       "AfOut_" + fileset.get_out_date(), 
+                       fileset.get_datetime() )
+            if config.use375af == "y":    
                 # Write active fire 375 coordinates to text
-                write_coordinates2text(Af375Out_list, "AfOut_" + H5DateStr, H5Date)
+                write_coordinates2text(config, Af375Out_list, 
+                       "AfOut_" + fileset.get_out_date(), 
+                       fileset.get_datetime())
 
         # Push active fire coordinates to PostGIS
-        if DatabaseOut == "y":
-            if use375af.lower() == "y":
+        if config.DatabaseOut == "y":
+            if config.use375af == "y":
                 # write 375 active fire to DB
-                push_list_to_postgis(Af375Out_list, H5Date, "active_fire", "375", "i")
-                vacuum_analyze("active_fire")
+                push_list_to_postgis(config,Af375Out_list, 
+                     fileset.get_datetime(), "active_fire", "375", "i")
+                #vacuum_analyze(config,"active_fire")
             
-            if use750af.lower() == "y":
+            if config.use750af == "y":
                 # write 750 active fire to DB
-                push_list_to_postgis(AfOut_list, H5Date, "active_fire", "750", "m")
-                vacuum_analyze("active_fire")
+                push_list_to_postgis(config,AfOut_list, 
+                     fileset.get_datetime(), "active_fire", "750", "m")
+                #vacuum_analyze(config,"active_fire")
         
             # check if fires are still active
-            print "\nChecking if fires are still active"
-            date_4db = datetime.datetime.strftime(H5Date, "%Y-%m-%d %H:%M:%S")
-            execute_check_4_activity(date_4db, TemporalProximity)
+            #print "\nChecking if fires are still active"
+            #date_4db = datetime.datetime.strftime(H5Date, "%Y-%m-%d %H:%M:%S")
+            #execute_check_4_activity(config, date_4db)
             
             # active fire to fires events 
             print "\nCopy active fire to fire events and create collections"
-            date_4db = datetime.datetime.strftime(H5Date, "%Y-%m-%d %H:%M:%S")
-            execute_active_fire_2_events(date_4db, TemporalProximity, SpatialProximity)
-            #vacuum_analyze("active_fire")
+            execute_active_fire_2_events(config, fileset.get_sql_date())
+            #vacuum_analyze(config,"active_fire")
     
             # simple confirm threshold burns 
 #            print "\nPerform simple confirm burned area"
 #            date_4db = datetime.datetime.strftime(H5Date, "%Y-%m-%d %H:%M:%S")
-#            execute_simple_confirm_burns(date_4db, TemporalProximity, SpatialProximity)
-#            #vacuum_analyze("threhold_burned")
-    
+#            execute_simple_confirm_burns(config, date_4db)
+#            #vacuum_analyze(config,"threshold_burned")
+   
             # threshold to fires events 
             print "\nEvaluate and copy thresholded burned area to fire events"
-            date_4db = datetime.datetime.strftime(H5Date, "%Y-%m-%d %H:%M:%S")
-            execute_threshold_2_events(date_4db, TemporalProximity, SpatialProximity)
-            #vacuum_analyze("threhold_burned")
-            vacuum_analyze('')
+            execute_threshold_2_events(config, fileset.get_sql_date())
+
+            vacuum_analyze(config,"active_fire")
+            vacuum_analyze(config,"threshold_burned")
+            #vacuum_analyze(config, '')
         
         # Clean up arrays
         AfOut_list = None
         del AfOut_list
-        AfArray = None
-        del AfArray
         Af375Out_list = None
         del Af375Out_list
-        Af375Array = None
-        del Af375Array
         
         gc.collect()
         print "Done Processing:", ImageDate,  
-        print "Number:", count, "of:", len(ImageDates)
+        print "Number:", count, "of:", len(config.SortedImageDates)
         end_indiviudal = datetime.datetime.now()
         print end_indiviudal.strftime("%Y%m%d %H:%M:%S")
         print "Elapsed time for individual:", (end_indiviudal - start_indiviudal).total_seconds(), "seconds"
         print "*"*50 + "\n"
 
+    # Output shapefile
+    if config.ShapeOut == "y":
+        output_shape_files(config)
+
+    config.save(os.path.join(config.ShapePath, '{0}_{1}.ini'.format(config.DBname,config.DBschema)))
 
     end_group = datetime.datetime.now()
     print end_group.strftime("%Y%m%d %H:%M:%S")
     print "Elapsed time for group:", (end_group - start_group).total_seconds(), "seconds"
 
     print "Done"
-    print "Done"
     
 ################################################################################
 
-if len(sys.argv) == 1:
-    print "\nMissing argrument"
-    print "\nEnter the ini file name as an argument when launching this script."
-    print "e.g., VIIRS_threshold.py VIIRS_threshold.ini"	
-    print "The ini file should be in the current working directory.\n"
-    sys.exit()
-IniFileName = sys.argv[1]    
-IniFile = os.path.join(os.getcwd(), IniFileName)
-	
-	
-ini = ConfigParser.ConfigParser()
-ini.read(IniFile)
-BaseDir = ini.get("InDirectory", "BaseDirectory")     #Directory with h5 data files  
-use375af = ini.get("ActiveFire", "use375af")              # Flag to use M-band 750 m active fire data, AVAFO (y or n)  
-use750af = ini.get("ActiveFire", "use750af")              # Flag to use I-band 375 m active fire data, VF375 (y or n)
-M07UB = float(ini.get("Thresholds", "M07UB"))         #Band 07 (0.86 um)upper bound
-M08LB = float(ini.get("Thresholds", "M08LB"))         #Band 08 (1.24 um)lower bound
-M08UB = float(ini.get("Thresholds", "M08UB"))         #Band 08 (1.24 um)upper bound
-M10LB = float(ini.get("Thresholds", "M10LB"))         #Band 10 (1.61 um)lower bound
-M10UB = float(ini.get("Thresholds", "M10UB"))         #Band 10 (1.61 um)upper bound
-M11LB = float(ini.get("Thresholds", "M11LB"))         #Band 11 (2.25 um)lower bound
-RthSub = float(ini.get("Thresholds", "RthSub"))       #RthSub is the factor subtracted from the 1.240 band when comparing to the Rth
-Rth = float(ini.get("Thresholds", "Rth"))             #Rth
-RthLB = float(ini.get("Thresholds", "RthLB"))         #RthLB is the factor that the Rth check must be greater than or equal to
-MaxSolZen = float(ini.get("Thresholds", "MaxSolZen")) #Maximum solar zenith angle, used to filter out night pixels from burned area thresholding 
-
-TemporalProximity = ini.get("ConfirmBurnParamaters", "TemporalProximity")
-SpatialProximity = int(ini.get("ConfirmBurnParamaters", "SpatialProximity"))	#Proximity of a thresholded point to active fire to be confirmed.
-
-TextOut = ini.get("OutputFlags", "TextFile").lower()
-DatabaseOut = ini.get("OutputFlags", "PostGIS").lower()
-PostBin = ini.get("OutputFlags", "PostgresqlBin").lower()
-
-DBname = ini.get("DataBaseInfo", "DataBaseName")
-DBuser = ini.get("DataBaseInfo", "UserName")
-pwd = ini.get("DataBaseInfo", "password")
-#Read list of image date/times
-ImageDates = ini.get("ImageDates", "ImageDates").split(",")
 
 if __name__ == "__main__":
-    run()
+    if len(sys.argv) == 1:
+        print "\nMissing argrument"
+        print "\nEnter the ini file name as an argument when launching this script."
+        print "e.g., VIIRS_threshold.py VIIRS_threshold.ini"	
+        print "The ini file should be in the current working directory.\n"
+        sys.exit()
+    IniFileName = sys.argv[1]    
+    IniFile = os.path.join(os.getcwd(), IniFileName)
+    config = vc.VIIRSConfig.load(IniFile)
+	
+    run(config)
