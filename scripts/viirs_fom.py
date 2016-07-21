@@ -46,7 +46,8 @@ def project_fire_events_nlcd(config) :
 
 def create_fire_events_raster(config, tbl, 
                               gt_schema, rast_table, geom_table, 
-                              filt_dist=-1) : 
+                              filt_dist=-1,
+                              filter_table=None) : 
     """dumps the ground truth fire mask to disk, overwrites by rasterizing fire_events, 
     reloads the table to postgis
     This ensures that the result is aligned to the specified ground truth 
@@ -59,9 +60,19 @@ def create_fire_events_raster(config, tbl,
     query = "SELECT viirs_rasterize_750('{0}', '{1}', '{2}', '{3}', '{4}', {5})".format(
           config.DBschema, tbl, gt_schema, rast_table, geom_table, filt_dist)
     vt.execute_query(config, query)
-
-    query = "SELECT viirs_rasterize_merge('{0}')".format(config.DBschema)
-    vt.execute_query(config, query)
+    
+    if filter_table is None  : 
+        query = "SELECT viirs_rasterize_merge('{0}', 'rast')".format(config.DBschema)
+        vt.execute_query(config, query)
+    else : 
+        query = "SELECT viirs_rasterize_merge('{0}', 'merged_rast')".format(config.DBschema)
+        vt.execute_query(config, query)
+        
+        query = "SELECT viirs_rasterize_filter('{0}','merged_rast','{1}','{2}')".format(
+              config.DBschema, gt_schema, filter_table)
+        vt.execute_query(config, query)
+              
+        
     
 def mask_sum(config, gt_schema, gt_table) : 
     """adds the mask values from the fire_events_raster to the values in the ground truth raster.
@@ -177,7 +188,7 @@ def find_missing_zonetbl_runs(gt_schema, zone_tbl, config) :
 
 def do_one_zonetbl_run(gt_schema, gt_table, 
                        zonedef_tbl, zone_tbl, zone_col, config,
-                       year=2013, spatial_filter=False):
+                       year=2013, spatial_filter=False, mask_tbl=None):
     """accumulates fire points from a single run into one or more zone tables.
     The zone definition table, results accumulation table, and column names
     are specified as parallel lists in zonedef_tbls, zone_tbls, zone_cols.
@@ -196,7 +207,7 @@ def do_one_zonetbl_run(gt_schema, gt_table,
     view_name = create_events_view(config, year)
     create_fire_events_raster(config, view_name,
                                 gt_schema, gt_table, zonedef_tbl,
-                                filt_dist=filt_dist)
+                                filt_dist=filt_dist,filter_table=mask_tbl)
     
     # fire_events raster is always the product of the above, no matter
     # which year is selected.
@@ -206,7 +217,8 @@ def do_one_zonetbl_run(gt_schema, gt_table,
     zonetbl_run(gt_schema, zonedef_tbl, zone_tbl, zone_col, config, nearest)
     
     
-def calc_all_ioveru_fom(run_datafile, gt_schema, gt_table, workers=1) : 
+def calc_all_ioveru_fom(run_datafile, gt_schema, gt_table, workers=1,
+                    filepat='*.ini') : 
     """calculates the i over u figure of merit for a batch of previously
     completed runs.
     User supplies the path name of a previously written CSV file which 
@@ -220,7 +232,7 @@ def calc_all_ioveru_fom(run_datafile, gt_schema, gt_table, workers=1) :
 
     runlist = pd.read_csv(run_datafile, index_col=0) 
     fomdata = np.zeros_like(runlist['run_id'],dtype=np.float)
-    config_list = vc.VIIRSConfig.load_batch(base_dir)
+    config_list = vc.VIIRSConfig.load_batch(base_dir,filepat)
 
     # prep ground truth table, giving each row a multipoint
     # geometry of the centroids of "true" pixels in the mask
@@ -249,7 +261,8 @@ def do_all_zonetbl_runs(base_dir, gt_schema, gt_table,
                        zone_col='zone',
                        year=2013, 
                        workers=1, only_missing=False,
-                       spatial_filter=False) : 
+                       spatial_filter=False,
+                       mask_tbl=None) : 
     """accumulates fire event raster points by polygon-defined zones.
     This function can optionally use the rasterized fire events tables 
     created by the do_ioveru_fom() method. It can also recover from an
@@ -271,7 +284,8 @@ def do_all_zonetbl_runs(base_dir, gt_schema, gt_table,
                       zone_tbl,
                       zone_col,
                       year=year,
-                      spatial_filter=spatial_filter)
+                      spatial_filter=spatial_filter,
+                      mask_tbl=mask_tbl)
 
     if workers == 1 : 
         map(workerfunc, config_list)

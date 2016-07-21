@@ -33,7 +33,7 @@ ConfigVector = namedtuple('ConfigVector', vector_param_names )
                   
 class VIIRSConfig (object) : 
     @classmethod
-    def merge_into_template(cls, thresh_vec, template) : 
+    def merge_into_template(cls, thresh_vec, template, runid=None) : 
         """creates a new VIIRSConfig object with thresh_vec grafted into the template
         
         Values in the resultant object may be "perturbed" in order to 
@@ -73,7 +73,10 @@ class VIIRSConfig (object) :
             merged.west  = template.west
 
         # handle changes
-        merged.run_id      = cls.create_run_id(merged)
+        if runid is not None : 
+            merged.run_id = runid
+        else : 
+            merged.run_id      = cls.create_run_id(merged)
         merged.ShapePath = merged.perturb_dir(template.ShapePath)
         merged.perturb_schema() 
         merged.sort_dates()
@@ -82,10 +85,10 @@ class VIIRSConfig (object) :
         return merged
 
     @classmethod
-    def load_batch(cls, base_dir) : 
+    def load_batch(cls, base_dir,filepat='*.ini') : 
         """explores all subdirectories of base_dir for ini_files, loads
         them, and returns them as a list."""
-        ini_files = glob.glob('{0}/*/*.ini'.format(base_dir))
+        ini_files = glob.glob('{0}/*/{1}'.format(base_dir,filepat))
         config_list = [cls.load(i) for i in ini_files ]
         return config_list
 
@@ -230,9 +233,9 @@ class VIIRSConfig (object) :
 
         ini.add_section("ConfirmBurnParameters")
         ini.set("ConfirmBurnParameters", "TemporalProximity", 
-                   '{:d}'.format(self.TemporalProximity))
+                   '{:d}'.format(int(self.TemporalProximity)))
         ini.set("ConfirmBurnParameters", "SpatialProximity", 
-                   '{:d}'.format(self.SpatialProximity))
+                   '{:d}'.format(int(self.SpatialProximity)))
 
         ini.add_section("OutputFlags")
         ini.set("OutputFlags", "TextFile", self.TextOut.lower())
@@ -254,7 +257,7 @@ class VIIRSConfig (object) :
 
         if self.has_window() : 
             ini.add_section("GeogWindow")
-            fmtfmt = '{}'
+            fltfmt = '{}'
             ini.set("GeogWindow", "North", fltfmt.format(self.north)) 
             ini.set("GeogWindow", "South", fltfmt.format(self.south)) 
             ini.set("GeogWindow", "East", fltfmt.format(self.east)) 
