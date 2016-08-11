@@ -32,7 +32,8 @@ BEGIN
         '(SELECT t.fid as t_fid, MAX(fe.fid) AS fe_fid ' || 
          'FROM ' || quote_ident(schema) || '.fire_events fe, ' || 
              quote_ident(schema) || '.fire_collections fc, ' ||
-             quote_ident(schema) || '.threshold_burned t ' ||
+             quote_ident(schema) || '.threshold_burned t, ' ||
+             quote_ident(landcover_schema)||'.'||quote_ident(no_burn_table)||' mask ' ||
          'WHERE ' ||
              -- glue and seed criteria
              'fe.collection_id = fc.fid AND ' || 
@@ -44,7 +45,10 @@ BEGIN
              'fc.last_update <= $1 AND ' || 
 
              -- spatial criterion
-             'ST_DWithin(ST_Transform(t.geom, 102008), fe.geom, $3) ' || 
+             'ST_DWithin(ST_Transform(t.geom, 102008), fe.geom, $3) AND ' || 
+             
+             -- mask out nonburnable
+             '(NOT masked) ' ||
 
         'GROUP BY t.fid) confirmed ' ||
      'WHERE fe.fid = fe_fid AND ' ||
@@ -63,15 +67,11 @@ BEGIN
             quote_ident(schema) || '.threshold_burned t ' ||
       'WHERE t.fid = cp.t_fid'  ;
 
-  update_collection := 'UPDATE ' || quote_ident(schema) || '.fire_collections fc ' || 
-      'SET last_update = $1 ' || 
-      'FROM (SELECT DISTINCT fc_fid FROM confirmed_pts) foo ' || 
-      'WHERE fc.fid = fc_fid' ;
-  
   confirm_point := 'UPDATE ' || quote_ident(schema) || '.threshold_burned t ' || 
       'SET confirmed_burn = TRUE ' || 
       'FROM confirmed_pts cp ' || 
       'WHERE t.fid = cp.t_fid' ; 
+
 
   EXECUTE 'CREATE TEMPORARY TABLE confirmed_pts AS ' || confirm_query
       USING collection, recent, distance ; 
@@ -80,7 +80,6 @@ BEGIN
 
   RAISE NOTICE 'adding % points.', added.c ; 
   EXECUTE insert_confirmed ; 
-  EXECUTE update_collection USING collection ; 
   EXECUTE confirm_point ;     
 END
 $BODY$

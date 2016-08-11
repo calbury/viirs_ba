@@ -13,7 +13,7 @@ DECLARE
   schema varchar(200) = $1; 
   collection timestamp without time zone := $2; 
   recent interval := $3;
-  distance integer := $4; 
+  distance integer := $4;  
 --   a_row active_fire%rowtype;
   a_row RECORD;
   ret RECORD;
@@ -29,14 +29,14 @@ DECLARE
   loop_query text ;
   
 BEGIN
+  -- selects currently active collections, to which the fire point should belong.
   select_collection := 'SELECT * from (SELECT fe.fid as fe_fid, ' || 
                        'fe.geom, fc.fid as fc_fid ' || 
                    'FROM ' || quote_ident(schema) || '.fire_events fe, ' || 
                               quote_ident(schema) || '.fire_collections fc ' || 
                    'WHERE fe.collection_id = fc.fid ' ||
                      'AND fc.last_update >= $1 - $2 ' || 
-                     'AND fc.last_update <= $1 ' || 
-                     'AND fc.active = TRUE) as tf ' ||  
+                     'AND fc.last_update <= $1) as tf ' ||  
     'WHERE ST_DWithin(ST_Transform($4, 102008), tf.geom, $3) LIMIT 1' ;
     
   append_point_to_collection := 'INSERT INTO ' || quote_ident(schema) || '.fire_events ' ||
@@ -65,10 +65,12 @@ BEGIN
       ', $4, $5, $6, $7)';    
 
 
-  loop_query := 'SELECT a.* FROM ' || quote_ident(schema) || '.active_fire a ' || 
-      'WHERE collection_date = $1' ;
+      
+  -- loops over all candidate active fire pixels from the specified collection.
+  loop_query := 'SELECT a.* FROM ' || quote_ident(schema)||'.active_fire a ' ||
+                'WHERE collection_date = $1 AND NOT masked' USING collection ; 
 
-  FOR a_row IN EXECUTE loop_query USING collection
+  FOR a_row IN EXECUTE loop_query 
   LOOP
   EXECUTE select_collection INTO dumrec USING collection, recent, distance, a_row.geom ;
   IF dumrec IS NOT NULL THEN 
