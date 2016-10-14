@@ -61,7 +61,7 @@ import os
 import sys
 import datetime
 import glob
-import pipes
+#import pipes
 import numpy as np
 import h5py
 import psycopg2
@@ -315,26 +315,26 @@ def output_shape_files(config) :
         os.makedirs(config.ShapePath)
 
     print "Exporting to point shapefile:"
-    Pgsql2shpExe = os.path.join(config.PostBin, "pgsql2shp")
+    Pgsql2shpExe = '"' + os.path.join(config.PostBin, "pgsql2shp") + '"'
     shp = config.ShapePath + '/' + 'fire_collection_point_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S')    
 
-    query = 'SELECT a.*, b.fid as col_id, b.active FROM "{0}".fire_events a, "{0}".fire_collections b WHERE a.collection_id = b.fid;'.format(config.DBschema)
+    query = '"SELECT a.*, b.fid as col_id, b.active FROM "{0}".fire_events a, "{0}".fire_collections b WHERE a.collection_id = b.fid;"'.format(config.DBschema)
     if config.DBhost is None : 
-        command =  '{0} -f {1} -h localhost -u {2} -P {3} -g geom {4} {5}'.format(pipes.quote(Pgsql2shpExe), shp, config.DBuser, config.pwd, config.DBname, pipes.quote(query))
+        command =  '{0} -f {1} -h localhost -u {2} -P {3} -g geom {4} {5}'.format(Pgsql2shpExe, shp, config.DBuser, config.pwd, config.DBname, query)
     else : 
-        command =  '{0} -f {1} -h {6} -u {2} -P {3} -g geom {4} {5}'.format(pipes.quote(Pgsql2shpExe), shp, config.DBuser, config.pwd, config.DBname, pipes.quote(query), config.DBhost)
+        command =  '{0} -f {1} -h {6} -u {2} -P {3} -g geom {4} {5}'.format(Pgsql2shpExe, shp, config.DBuser, config.pwd, config.DBname, query, config.DBhost)
             
     print command
     subprocess.call(command, shell = True)
 
     print "Exporting to polygon shapefile:"
     shp = config.ShapePath + '/' + 'fire_collection_poly_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S')    
-    query = 'SELECT ST_Multi(ST_Union(ST_Expand(geom, 375))) as geom, collection_id FROM "{0}".fire_events GROUP BY collection_id;'.format(config.DBschema)
+    query = '"SELECT ST_Multi(ST_Union(ST_Expand(geom, 375))) as geom, collection_id FROM "{0}".fire_events GROUP BY collection_id;"'.format(config.DBschema)
 
     if config.DBhost is None : 
-        command =  '{0} -f {1} -h localhost -u {2} -P {3} {4} {5}'.format(pipes.quote(Pgsql2shpExe), shp, config.DBuser, config.pwd, config.DBname, pipes.quote(query))
+        command =  '{0} -f {1} -h localhost -u {2} -P {3} {4} {5}'.format(Pgsql2shpExe, shp, config.DBuser, config.pwd, config.DBname, query)
     else : 
-        command =  '{0} -f {1} -h {6} -u {2} -P {3} {4} {5}'.format(pipes.quote(Pgsql2shpExe), shp, config.DBuser, config.pwd, config.DBname, pipes.quote(query), config.DBhost)
+        command =  '{0} -f {1} -h {6} -u {2} -P {3} {4} {5}'.format(Pgsql2shpExe, shp, config.DBuser, config.pwd, config.DBname, query, config.DBhost)
     print command
     subprocess.call(command, shell = True)
 
