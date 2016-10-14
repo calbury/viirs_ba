@@ -1,0 +1,261 @@
+#!perl
+
+# feed IPOPP VIIRS Level 1 files to IDL FireDetector. currently runs
+# on 166.2.126.190. input data comes from IPOPP boxes, output goes to
+# 166.2.126.76.
+#
+# david hayes - rsac - january 2014
+
+use strict;
+use warnings;
+
+use File::Basename;
+use File::Copy;
+use Getopt::Long;
+use Time::Local;
+
+use lib dirname( __FILE__ ) . '/../PerlMods';
+use IDLUtils qw( $debug $lmutil &shellify );
+use SimpleDebug  qw( $debug &debug );
+
+sub debug;
+
+# double-quoted strings that have backwhacks for directory seperators seem to
+# play nicest with anything that gets passed to the windows shell via open()
+# (or similar). so.... these three values will all get passed through
+# shellify() before getting used in any open()-like calls. yup - windows'
+# quoting is a real mess. note also that IDL doesn't seem to understand UNC
+# paths. that's why $runner has a drive and directory.
+our $idl          =  'C:/Program Files/Exelis/IDL82/bin/bin.x86_64/idl.exe';
+our $lmutil       =  'C:/Program Files/Exelis/IDL82/bin/bin.x86_64/lmutil.exe';
+our $runner       =  'L:/IDLFiles/VIIRS-FireDetect/runner.pro';
+
+# perl understands UNCs just fine, so let's use them wherever we can.
+our $outputDir    =  '//166.2.126.76/VIIRS-IBand/Output/';
+our $scratchDir   =  'L:/VFDScratch/';
+our @level1Dirs   =  qw( //166.2.126.62/raid/pub/gsfcdata/npp/viirs/level1/
+                         //166.2.126.63/raid/pub/gsfcdata/npp/viirs/level1/
+                         //166.2.126.64/raid/pub/gsfcdata/npp/viirs/level1/
+                         //166.2.126.218/raid/pub/gsfcdata/npp/viirs/level1/ );
+
+# files needed by the IDL FireDetecter thing.
+our @prefixes     =  qw( SVI01 SVI02 SVI03 SVI04 SVI05 SVM13 GITCO );
+
+# getopts variables.
+our ( $debug, $help, $prompt, $run );
+
+# catch ctrl-break, ctrl-c.
+$SIG{'BREAK'}     =  \&cleanUp;
+$SIG{'INT'}       =  \&cleanUp;
+
+# check our command line arguments.
+my $ok            =  GetOptions( 'debug'   => sub { $debug++; },
+                                 'help'    => \$help,
+                                 'prompt'  => \$prompt,
+                                 'run'     => \$run );
+
+# help!!
+if ( $help || ! $ok ) {
+  help();
+  exit 0;
+}
+
+sanityCheck();
+
+my $filesHRef  =  getFiles();   # hash ref.
+
+if ( %{ $filesHRef } ) {
+  processFiles( $filesHRef );
+}
+else {
+  print 'Nothing to do. Exiting.', "\n" if -t STDOUT;
+}
+
+exit 0;                # no more
+
+sub sanityCheck {      # make sure directories exist
+  my @variables  =  qw( $outputDir $scratchDir $idl $lmutil $runner );
+
+  for my $variable ( @variables ) {
+    my $eval = eval( $variable );
+    die "No ${variable}: ${eval}." unless -e $eval;
+  }
+
+  # needed for IDL to run
+  for my $drive ( 'L:', 'V:' ) {
+    die "No drive: ${drive}." unless -e $drive;
+  }
+
+  # not needed, but nice to have...
+  for my $level1Dir ( @level1Dirs ) {
+    warn "No share: ${level1Dir}." unless -e $level1Dir;
+  }
+
+  return 0;
+}
+
+sub getFiles {         # find some per-day files to process
+
+  # this is a hash of arrays. key = year/doy, values = array of filenames.
+  # our IDL script processes every file in a given directory, so we use this
+  # to copy all of our files for a day into a single yeardoy-named directory.
+
+  my %files;
+
+  my @allFiles  =  getAllFiles();
+
+  # group everything into %files.
+  for my $file ( @allFiles ) {
+    if ( $file =~ m{ _npp_d ( \d{8} )( _t \d{7} _e \d{7} ) _ }x ) {
+      my $yearDoy =  getYearDoy( $1 );
+
+      # see if this file has been processed already. (for some passes, we don't
+      # get a .txt file. dunno why.)
+      my $txt  =  $outputDir . $yearDoy . '/NPP_VIIRS_' . $1 . $2 . '_IMASK.txt';
+      my $hdf  =  $outputDir . $yearDoy . '/NPP_VIIRS_' . $1 . $2 . '_IMASK.hdf';
+      next if -e $hdf && -s $hdf;
+
+      debug $yearDoy, ' -> ', $file if $debug and $debug > 1 ;
+      push @{ $files{ $yearDoy } }, $file;
+    }
+    else {
+      warn 'weird file: ', $file;
+    }
+  }
+
+  return \%files;
+}
+
+sub getAllFiles {      # find all the files in all the level 1 directories.
+
+  # something like ^(?:SVI01|SVI02|SVI03|SVI04|SVI05|SVM13|GITCO).+\.h5$
+  my $regex = '^(?:' . ( join '|', @prefixes ) . ').+\.h5$';
+  my @allFiles;
+
+  for my $level1Dir ( @level1Dirs ) {
+    debug "Checking ${level1Dir}.";
+
+    if ( opendir my $dirFH, $level1Dir ) {
+      for ( sort readdir $dirFH ) {
+        next unless /$regex/;
+        my $filename  =  $level1Dir . $_;
+        next unless -f $filename && -s _;
+        push @allFiles, $filename;
+      }
+      debug 'Found ', scalar @allFiles, ' files.';
+      closedir $dirFH;
+    }
+    else {
+      warn "Can't opendir ${level1Dir}: $!";
+    }
+  }
+
+  return @allFiles;
+}
+
+sub getYearDoy {        # make a YearDoy from a YearMonthDay
+  my $yearMonthDay            =  shift;
+  my ( $year, $month, $day )  =  unpack( 'a4 a2 a2', $yearMonthDay );
+  my $time                    =  timelocal( 0, 0, 12, $day, $month - 1, $year );
+  my $doy                     =  ( localtime $time )[7] + 1;  # yday is 0-based.
+
+  return sprintf( "%04d%03d", $year, $doy );
+}
+
+sub processFiles {     # do everything
+
+  my $filesHRef  =  shift;
+
+  cleanUp() if $run;     # clean up
+
+  for my $yearDoy ( sort keys %{ $filesHRef } ) {
+
+    # make the directory where IDL is going to dump its files. maybe.
+    my $fullOutputDir  =  $outputDir . $yearDoy;
+    if ( ! -e $fullOutputDir ) {
+      debug 'No output directory: ', $fullOutputDir;
+      if ( $run ) {
+        mkdir $fullOutputDir
+          or die $!;
+      }
+    }
+
+    # stage our files.
+    if ( $run ) {
+      for my $filename ( @{ $filesHRef->{$yearDoy} } ) {
+        debug 'Copying', ( split( /\//, $filename ) )[-1];
+        copy $filename, $scratchDir
+          or die $!;
+      }
+    }
+    else {
+      debug 'Not copying files.';
+    }
+
+    # get busy!
+    runIDL( $yearDoy );
+
+    # clean up
+    cleanUp() if $run;
+  }
+
+  return 0;
+}
+
+sub runIDL {          # kick off IDL.
+
+  my $yearDoy    =  shift;
+  local $idl     =  shellify( $idl );      # see note above about passing
+  local $runner  =  shellify( $runner );   # stuff to the windows shell.
+  my @command    =  qq( $idl $runner -args $yearDoy );
+
+  if ( $run ) {
+    if ( $prompt ) {      # hog the IDL license
+      print 'Hit enter now.',"\n";
+      my $junk = <>;
+    }
+    debug "Running command @command. This could take a while.";
+    system( @command ) == 0 or warn '\'system\' returned a non-zero status.';
+  }
+  else {
+    debug "Not running command @command";
+  }
+  return 0;
+}
+
+sub cleanUp {          # rm -rf $scratchDir/*
+
+  my @unlink;
+
+  print 'Cleaning up.', "\n" if -t STDOUT;
+
+  opendir my $dirFH, $scratchDir
+    or die "Can't opendir: $!";
+  for my $filename ( sort readdir $dirFH ) {
+    push @unlink, $scratchDir . $filename
+      if -f $scratchDir . $filename;
+  }
+  closedir $dirFH;
+
+  if ( @unlink ) {
+    unlink @unlink or warn $!;
+  }
+
+  return 0
+}
+
+sub help {              # help!
+  print qq+Usage: $0 [OPTIONS]
+
+OPTIONS:
+  -d, --debug     Print some debugging information.
+
+  -r, --run       Actually create output files (default is to do a dry run.)
+
+  -h, --help      You're reading it...
+
++;
+
+  return 0;
+}                       # end sub 'help'.
+
