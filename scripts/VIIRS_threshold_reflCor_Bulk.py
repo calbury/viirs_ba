@@ -101,9 +101,9 @@ def id(x):
 
 # Write the coordinate list to text file.
 def write_coordinates2text(config, coordsList, fileName, date):
-    if not os.path.exists(os.path.join(config.BaseDir,"TextOut")):
-        os.makedirs(os.path.join(config.BaseDir,"TextOut"))
-    outfile = os.path.join(config.BaseDir, "TextOut", fileName + ".txt")
+    if not os.path.exists(os.path.join(config.ShapePath,"TextOut")):
+        os.makedirs(os.path.join(config.ShapePath,"TextOut"))
+    outfile = os.path.join(config.ShapePath, "TextOut", fileName + ".txt")
     if os.path.exists(outfile):
         os.remove(outfile)
     
@@ -177,7 +177,6 @@ def postgis_conn_params(config) :
         ConnParam = "host={3} dbname={0} user={1} password={2}".format(
            config.DBname, config.DBuser, config.pwd, config.DBhost)
     return ConnParam
-
 
 # Push the coordinates and date/time of the thresholded pixels to PostGIS
 def push_list_to_postgis(config, list, date, table, pSize, band):
@@ -408,6 +407,15 @@ class FileSet (object) :
             dt = components[0][1:] + components[1][1:-1]
             self._dt = datetime.datetime.strptime(dt, '%Y%m%d%H%M%S')
         return self._dt
+    
+    #@classmethod
+    def get_julianYearDay(self):
+        """Computes julian year/day e.g. 2016162 for July 10, 2016"""
+        if not hasattr(self, '_julianYearDay'):
+            components = [int(self.ImageDate[1:5]),int(self.ImageDate[5:7]),int(self.ImageDate[7:9])]
+            dateObj = datetime.date(components[0],components[1],components[2])
+            self._julianYearDay = str(components[0]) + dateObj.strftime('%j')
+        return self._julianYearDay
         
     def get_out_date(self) : 
         """a formatted date string to include in output file names"""
@@ -434,12 +442,14 @@ class FileSet (object) :
     def find_hdf_file(self, basedir, prefix,extension="h5") : 
         """locates an hdf4/5 file in the basedir having a specific prefix,
         returns the full pathname to the file"""
-        h5 = glob.glob(os.path.join(basedir, 
-           "{0}_{1}_e???????_b00001_c????????????????????_all-_dev.{2}".format(
+        #print "*"*30
+        #print basedir, self.get_julianYearDay(),"{0}_{1}_e???????_b00001_c????????????????????_ipop_dev.{2}".format(prefix,self.get_imagedate(), extension)
+        h5 = glob.glob(os.path.join(basedir, self.get_julianYearDay(),
+           "{0}_{1}_e???????_b00001_c????????????????????_ipop_dev.{2}".format(
               prefix,self.get_imagedate(), extension)))[0]
         return h5
         
-    def get_file_names(self, basedir) : 
+    def get_file_names(self, L1basedir, L2basedir) : 
         """attempt to locate all files in this set, return a dictionary of filenames"""
         if not hasattr(self, "_filenames") : 
             self._filenames = {} 
@@ -452,12 +462,16 @@ class FileSet (object) :
                         ("VF375_npp", 'hdf'),
                         ("AVAFO_npp", 'h5') ]
                         
-            for pre, ext in fileset :
+            for pre, ext in fileset[:-2] :
                 try : 
-                    self._filenames[pre] = self.find_hdf_file(basedir, pre, ext)
+                    self._filenames[pre] = self.find_hdf_file(L1basedir, pre, ext)
                 except : 
                     pass
-            
+            for pre, ext in fileset[-2:]:
+                try:
+                    self._filenames[pre] = self.find_hdf_file(L2basedir, pre, ext)
+                except:
+                    pass
         return self._filenames
         
 class ReflectanceFile(object) : 
@@ -708,7 +722,7 @@ def run(config):
         print ImageDate + '\n'
         
         fileset = FileSet.from_imagedate(ImageDate)
-        files = fileset.get_file_names(config.BaseDir)
+        files = fileset.get_file_names(config.L1BaseDir, config.L2BaseDir)
 
         # load the reflectance data from the hdf files
         m07 = VIIRSReflectanceFile.load(files['SVM07_npp'],'SVM07_npp')     
@@ -865,8 +879,13 @@ def run(config):
         del AfOut_list
         Af375Out_list = None
         del Af375Out_list
-        
         gc.collect()
+        
+        # update processed_scenes table
+        processed_query = "INSERT INTO public.processed_scenes (\"year_jday\", \"timestamp\") VALUES (\'{0}\', \'{1}\');".format(fileset.get_julianYearDay(), ImageDate)
+        print processed_query
+        execute_query(config, processed_query)
+        
         print "Done Processing:", ImageDate,  
         print "Number:", count, "of:", len(config.SortedImageDates)
         end_indiviudal = datetime.datetime.now()

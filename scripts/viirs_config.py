@@ -54,7 +54,8 @@ class VIIRSConfig (object) :
         merged.pwd           = template.pwd
         
         merged.ImageDates    = template.ImageDates
-        merged.BaseDir       = template.BaseDir
+        merged.L1BaseDir     = template.L1BaseDir
+        merged.L2BaseDir     = template.L2BaseDir
         merged.use375af      = template.use375af
         merged.use750af      = template.use750af
         
@@ -127,7 +128,8 @@ class VIIRSConfig (object) :
         # copy the fixed values
         
         target = cls()
-        target.BaseDir = ini.get("InDirectory", "BaseDirectory")
+        target.L1BaseDir = ini.get("InDirectory", "L1BaseDirectory")
+        target.L2BaseDir = ini.get("InDirectory", "L2BaseDirectory")
         
         target.use375af = ini.get("ActiveFire", "use375af")              # Flag to use M-band 750 m active fire data, AVAFO (y or n)  
         target.use750af = ini.get("ActiveFire", "use750af")              # Flag to use I-band 375 m active fire data, VF375 (y or n)
@@ -219,7 +221,8 @@ class VIIRSConfig (object) :
         ini = ConfigParser() 
         
         ini.add_section("InDirectory")
-        ini.set("InDirectory", "BaseDirectory", self.BaseDir)
+        ini.set("InDirectory", "L1BaseDirectory", self.L1BaseDir)
+        ini.set("InDirectory", "L2BaseDirectory", self.L2BaseDir)
         
         ini.add_section("ActiveFire")
         ini.set("ActiveFire", "use375af",self.use375af.lower())              # Flag to use M-band 750 m active fire data, AVAFO (y or n)  
