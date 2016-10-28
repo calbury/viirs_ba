@@ -51,9 +51,9 @@ try:
 except:
     sd = collections.defaultdict(list)
     pastDays = []
-for k, v in sd.iteritems():
-    print k
-    print v
+#for k, v in sd.iteritems():
+#    print k
+#    print v
     
 # Get list of days 
 days = glob.glob(os.path.join(pathL1,'[0-9][0-9][0-9][0-9][0-9][0-9][0-9]'))
