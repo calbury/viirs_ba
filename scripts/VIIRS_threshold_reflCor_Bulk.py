@@ -708,9 +708,12 @@ class ActiveFire375 (ActiveFire) :
         return con
 
 def run(config):
-    
-    if config.DatabaseOut == "y":
-        initialize_schema_for_postgis(config)
+    #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+    #!!!!!!Do not uncomment the two lines below. They execute init_schema which 
+    #!!!!!!starts by dropping the schema in named in the ini file.!!!!!!!!!!!!!
+    #!!!!!!You could loose all of your data!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+#    if config.DatabaseOut == "y":
+#        initialize_schema_for_postgis(config)
 
     #Loop through BaseDir, look for h5s and load arrays
     count = 0
@@ -872,6 +875,8 @@ def run(config):
 
             vacuum_analyze(config,"active_fire")
             vacuum_analyze(config,"threshold_burned")
+            vacuum_analyze(config,"fire_events")
+            vacuum_analyze(config,"fire_collections")
             #vacuum_analyze(config, '')
         
         # Clean up arrays
@@ -882,9 +887,10 @@ def run(config):
         gc.collect()
         
         # update processed_scenes table
-        processed_query = "INSERT INTO public.processed_scenes (\"year_jday\", \"timestamp\") VALUES (\'{0}\', \'{1}\');".format(fileset.get_julianYearDay(), ImageDate)
+        processed_query = "INSERT INTO {0}.processed_scenes (\"year_jday\", \"time_stamp\") VALUES (\'{1}\', \'{2}\');".format(config.DBschema, fileset.get_julianYearDay(), ImageDate)
         print processed_query
         execute_query(config, processed_query)
+        vacuum_analyze(config,"processed_scenes")
         
         print "Done Processing:", ImageDate,  
         print "Number:", count, "of:", len(config.SortedImageDates)
@@ -896,7 +902,6 @@ def run(config):
     # Output shapefile
     if config.ShapeOut == "y":
         output_shape_files(config)
-
     config.save(os.path.join(config.ShapePath, '{0}_{1}.ini'.format(config.DBname,config.DBschema)))
 
     end_group = datetime.datetime.now()

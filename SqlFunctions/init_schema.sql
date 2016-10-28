@@ -2,10 +2,43 @@ CREATE OR REPLACE FUNCTION init_schema(name text)
    RETURNS void AS
 $BODY$
     BEGIN
-
+    
     EXECUTE 'DROP SCHEMA IF EXISTS ' || quote_ident(name) || ' CASCADE' ;
     EXECUTE 'CREATE SCHEMA ' || quote_ident(name) ; 
     
+    --
+    -- Name: processed_scenes; Type: TABLE; Schema: public; Owner: postgres
+    --
+    EXECUTE 'CREATE TABLE ' || quote_ident(name) || '.processed_scenes (' ||
+        'id bigint NOT NULL, ' ||
+        'year_jday bigint, ' || 
+        'time_stamp character(18), ' || 
+        'comment text)';
+    
+    
+    EXECUTE 'ALTER TABLE ' || quote_ident(name) || '.processed_scenes OWNER TO postgres';
+    
+    --
+    -- Name: processed_scenes_fid_seq; Type: SEQUENCE; Schema: public; Owner: postgres
+    --
+    
+    EXECUTE 'CREATE SEQUENCE ' || quote_ident(name) || '.processed_scenes_id_seq ' ||
+        'START WITH 1 ' ||
+        'INCREMENT BY 1 ' || 
+        'NO MINVALUE ' || 
+        'NO MAXVALUE ' ||
+        'CACHE 1';
+    
+    
+    EXECUTE 'ALTER TABLE ' || quote_ident(name) || '.processed_scenes_id_seq OWNER TO postgres';
+    
+    --
+    -- Name: processed_scenes_fid_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: postgres
+    --
+    
+    EXECUTE 'ALTER SEQUENCE ' || quote_ident(name) || '.processed_scenes_id_seq OWNED BY '||
+        quote_ident(name) || '.processed_scenes.id';
+
     --
     -- Name: active_fire; Type: TABLE; Schema: public; Owner: postgres
     --
@@ -168,6 +201,15 @@ $BODY$
     --
     
     EXECUTE 'ALTER TABLE ONLY ' || quote_ident(name) || 
+      '.processed_scenes ALTER COLUMN id SET DEFAULT ' ||
+      'nextval(' || quote_literal(quote_ident(name) || '.processed_scenes_id_seq') || '::regclass)';
+    
+    
+    --
+    -- Name: fid; Type: DEFAULT; Schema: public; Owner: postgres
+    --
+    
+    EXECUTE 'ALTER TABLE ONLY ' || quote_ident(name) || 
       '.active_fire ALTER COLUMN fid SET DEFAULT ' ||
       'nextval(' || quote_literal(quote_ident(name) || '.active_fire_fid_seq') || '::regclass)';
     
@@ -197,6 +239,14 @@ $BODY$
     EXECUTE 'ALTER TABLE ONLY ' || quote_ident(name) || 
       '.threshold_burned ALTER COLUMN fid SET DEFAULT ' ||
       'nextval(' || quote_literal(quote_ident(name) || '.threshold_burned_fid_seq') || '::regclass)';
+    
+    
+    --
+    -- Name: processed_scenes_pkey; Type: CONSTRAINT; Schema: public; Owner: postgres
+    --
+    
+    EXECUTE 'ALTER TABLE ONLY ' || quote_ident(name) || '.processed_scenes ' || 
+        'ADD CONSTRAINT ' || quote_ident(name || '_processed_scenes_pkey') || ' PRIMARY KEY (id)';
     
     
     --
@@ -264,6 +314,13 @@ $BODY$
     
     EXECUTE 'CREATE INDEX ' || quote_ident('idx_' || name || '_fire_collections_last_update') || ' ON ' || 
        quote_ident(name) || '.fire_collections (last_update DESC NULLS LAST)';
+
+    --
+    -- Name: idx_processed_scenes_id; Type: INDEX; Schema: public; Owner: postgres
+    --
+    
+    EXECUTE 'CREATE INDEX ' || quote_ident('idx_' || name || '_processed_scenes_fid') || ' ON ' || 
+       quote_ident(name) || '.processed_scenes (id)';
 
     --
     -- Name: idx_fire_collections_fid; Type: INDEX; Schema: public; Owner: postgres
