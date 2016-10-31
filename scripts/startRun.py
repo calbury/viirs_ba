@@ -156,9 +156,13 @@ with open(os.path.join(scriptsDir, iniFile), "a") as ini:
    ini.write(','.join(d for d in timeStamps))
    #ini.write(','.join(timeStamps()))
 
-sysCommand = r"C:\fiddle\VIIRS\viirs_ba\scripts\VIIRS_threshold_reflCor_Bulk.py " + r"C:\fiddle\VIIRS\viirs_ba\scripts\operatinalVIIRS.ini" 
-print sysCommand
-os.system(sysCommand)
+if len(timeStamps) > 0:   
+    sysCommand = r"C:\fiddle\VIIRS\viirs_ba\scripts\VIIRS_threshold_reflCor_Bulk.py " + r"C:\fiddle\VIIRS\viirs_ba\scripts\operatinalVIIRS.ini" 
+    print len(timeStamps) + "new images. Kicking off process."
+    print sysCommand
+    os.system(sysCommand)
+else:
+    print "No new images, doing nothing."
 
 # Remove the running flag file
 if os.path.exists(runningFlagFile):
