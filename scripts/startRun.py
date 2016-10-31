@@ -25,7 +25,15 @@ def execute_read_query(queryText):
     conn.close()
     print "End", queryText, get_time()
     return rows
-   
+
+# Creates a flag file to indicate the script is running
+def createRunningFlagFile(flagFile):
+    if os.path.exists(flagFile):
+        os.remove(flagFile)
+    with open(flagFile, "w") as f:
+        f.write("This file is here to indicate that the script:\n")
+        f.write("C:\\fiddle\\VIIRS\\viirs_ba\\scripts\\VIIRS_threshold_reflCor_Bulk.py\n")
+        f.write("Is running and should not be kicked off again.")    
     
 ################################################################################
 scriptsDir =  r"C:\fiddle\VIIRS\viirs_ba\scripts"
@@ -38,6 +46,11 @@ pathL1 = "v:\\"
 pathL2 = "w:\\"
 #d = 'd20160925_t1955425'
 schema = "operational"
+runningFlagFile = r"C:\fiddle\VIIRS\viirs_ba\scripts\viirsIsRunning.txt"
+
+
+#Create a flag file to indicate that the script is running
+createRunningFlagFile(runningFlagFile)
 
 processedScenesQuery = "SELECT year_jday, time_stamp FROM {0}.processed_scenes".format(schema)
 try:
@@ -142,3 +155,11 @@ with open(os.path.join(scriptsDir, iniFile), "a") as ini:
    #ini.write(''.join('{},'.format(d) for d in timeStamps))
    ini.write(','.join(d for d in timeStamps))
    #ini.write(','.join(timeStamps()))
+
+sysCommand = r"C:\fiddle\VIIRS\viirs_ba\scripts\VIIRS_threshold_reflCor_Bulk.py " + r"C:\fiddle\VIIRS\viirs_ba\scripts\operatinalVIIRS.ini" 
+print sysCommand
+os.system(sysCommand)
+
+# Remove the running flag file
+if os.path.exists(runningFlagFile):
+    os.remove(runningFlagFile)

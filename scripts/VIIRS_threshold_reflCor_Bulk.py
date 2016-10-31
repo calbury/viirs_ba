@@ -439,14 +439,36 @@ class FileSet (object) :
             self.ImageDate = "d{0:%Y%m%d}_t{0:%H%M%S}".format(self._dt)
         return self.ImageDate
         
+#    def find_hdf_file(self, basedir, prefix,extension="h5") : 
+#        """locates an hdf4/5 file in the basedir having a specific prefix,
+#        returns the full pathname to the file"""
+#        #print "*"*30
+#        #print basedir, self.get_julianYearDay(),"{0}_{1}_e???????_b00001_c????????????????????_ipop_dev.{2}".format(prefix,self.get_imagedate(), extension)
+#        h5 = glob.glob(os.path.join(basedir, self.get_julianYearDay(),
+#           "{0}_{1}_e???????_b00001_c????????????????????_ipop_dev.{2}".format(
+#              prefix,self.get_imagedate(), extension)))[0]
+#        return h5
     def find_hdf_file(self, basedir, prefix,extension="h5") : 
         """locates an hdf4/5 file in the basedir having a specific prefix,
         returns the full pathname to the file"""
         #print "*"*30
         #print basedir, self.get_julianYearDay(),"{0}_{1}_e???????_b00001_c????????????????????_ipop_dev.{2}".format(prefix,self.get_imagedate(), extension)
-        h5 = glob.glob(os.path.join(basedir, self.get_julianYearDay(),
+        h5s = glob.glob(os.path.join(basedir, self.get_julianYearDay(),
            "{0}_{1}_e???????_b00001_c????????????????????_ipop_dev.{2}".format(
-              prefix,self.get_imagedate(), extension)))[0]
+              prefix,self.get_imagedate(), extension)))
+        # Check to see if there is more than one of a given file. Sometimes due 
+        # to an unknown error, there are multiple versions of a file with 
+        # different processing times. If so choose the version with the last 
+        # (most recent)processing time stamp.
+        # Should I add a bit here to make sure the same processing time is used
+        # for each file?? not sure. C.A.
+        if len(h5s) > 1:
+            processTimes = {}
+            for f in h5s:
+                processTimes[f] = datetime.datetime.strptime(os.path.basename(f).split("_")[6][1:15], "%Y%m%d%H%M%S")
+                h5 = max(processTimes, key=lambda key: processTimes[key])
+        else:
+            h5 = h5s[0]
         return h5
         
     def get_file_names(self, L1basedir, L2basedir) : 
@@ -907,8 +929,8 @@ def run(config):
     end_group = datetime.datetime.now()
     print end_group.strftime("%Y%m%d %H:%M:%S")
     print "Elapsed time for group:", (end_group - start_group).total_seconds(), "seconds"
-
     print "Done"
+
     
 ################################################################################
 
