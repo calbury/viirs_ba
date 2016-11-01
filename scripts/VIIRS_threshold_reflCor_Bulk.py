@@ -737,6 +737,10 @@ def run(config):
 #    if config.DatabaseOut == "y":
 #        initialize_schema_for_postgis(config)
 
+#    if os.path.exists(r"C:\fiddle\VIIRS\viirs_ba\scripts\viirsIsRunning.txt"):
+#        print "This process is already running."
+#        sys.exit()
+
     #Loop through BaseDir, look for h5s and load arrays
     count = 0
     start_group = datetime.datetime.now()
@@ -909,7 +913,8 @@ def run(config):
         gc.collect()
         
         # update processed_scenes table
-        processed_query = "INSERT INTO {0}.processed_scenes (\"year_jday\", \"time_stamp\") VALUES (\'{1}\', \'{2}\');".format(config.DBschema, fileset.get_julianYearDay(), ImageDate)
+        updateTime = datetime.datetime.now()
+        processed_query = "INSERT INTO {0}.processed_scenes (\"year_jday\", \"time_stamp\", \"comment\") VALUES (\'{1}\', \'{2}\', \'{3}\');".format(config.DBschema, fileset.get_julianYearDay(), ImageDate, updateTime.strftime("%Y%m%d %H:%M:%S"))
         print processed_query
         execute_query(config, processed_query)
         vacuum_analyze(config,"processed_scenes")
