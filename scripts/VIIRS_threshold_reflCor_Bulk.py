@@ -72,6 +72,15 @@ import viirs_config as vc
 from pyhdf.SD import SD, SDC
 from itertools import islice, chain
 
+# Creates a flag file to indicate the script is running
+def createRunningFlagFile(flagFile):
+    if os.path.exists(flagFile):
+        os.remove(flagFile)
+    with open(flagFile, "w") as f:
+        f.write("This file is here to indicate that the script:\n")
+        f.write("C:\\fiddle\\VIIRS\\viirs_ba\\scripts\\VIIRS_threshold_reflCor_Bulk.py\n")
+        f.write("Is running and should not be kicked off again.")    
+
 # Friendly names for relevant projections: 
 srids = { 
   "WGS84" : 4326,
@@ -737,10 +746,9 @@ def run(config):
 #    if config.DatabaseOut == "y":
 #        initialize_schema_for_postgis(config)
 
-#    if os.path.exists(r"C:\fiddle\VIIRS\viirs_ba\scripts\viirsIsRunning.txt"):
-#        print "This process is already running."
-#        sys.exit()
-
+    #Create a flag file to indicate that the script is running
+    runningFlagFile = r"C:\fiddle\VIIRS\viirs_ba\scripts\viirsIsRunning.txt"
+    createRunningFlagFile(runningFlagFile)
     #Loop through BaseDir, look for h5s and load arrays
     count = 0
     start_group = datetime.datetime.now()
@@ -926,6 +934,8 @@ def run(config):
         print "Elapsed time for individual:", (end_indiviudal - start_indiviudal).total_seconds(), "seconds"
         print "*"*50 + "\n"
 
+        
+        
     # Output shapefile
     if config.ShapeOut == "y":
         output_shape_files(config)
@@ -935,7 +945,9 @@ def run(config):
     print end_group.strftime("%Y%m%d %H:%M:%S")
     print "Elapsed time for group:", (end_group - start_group).total_seconds(), "seconds"
     print "Done"
-
+    # Remove the running flag file
+    if os.path.exists(runningFlagFile):
+        os.remove(runningFlagFile)
     
 ################################################################################
 
@@ -950,5 +962,4 @@ if __name__ == "__main__":
     IniFileName = sys.argv[1]    
     IniFile = os.path.join(os.getcwd(), IniFileName)
     config = vc.VIIRSConfig.load(IniFile)
-	
     run(config)

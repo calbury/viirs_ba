@@ -26,14 +26,7 @@ def execute_read_query(queryText):
     print "End", queryText, get_time()
     return rows
 
-# Creates a flag file to indicate the script is running
-def createRunningFlagFile(flagFile):
-    if os.path.exists(flagFile):
-        os.remove(flagFile)
-    with open(flagFile, "w") as f:
-        f.write("This file is here to indicate that the script:\n")
-        f.write("C:\\fiddle\\VIIRS\\viirs_ba\\scripts\\VIIRS_threshold_reflCor_Bulk.py\n")
-        f.write("Is running and should not be kicked off again.")    
+
     
 ################################################################################
 scriptsDir =  r"C:\fiddle\VIIRS\viirs_ba\scripts"
@@ -48,9 +41,11 @@ pathL2 = "w:\\"
 schema = "operational"
 runningFlagFile = r"C:\fiddle\VIIRS\viirs_ba\scripts\viirsIsRunning.txt"
 
+# check to see if VIIRS_threshold_reflCor_Bulk is already running
+if os.path.exists(r"C:\fiddle\VIIRS\viirs_ba\scripts\viirsIsRunning.txt"):
+    print "This process is already running."
+    sys.exit()
 
-#Create a flag file to indicate that the script is running
-createRunningFlagFile(runningFlagFile)
 
 processedScenesQuery = "SELECT year_jday, time_stamp FROM {0}.processed_scenes".format(schema)
 try:
