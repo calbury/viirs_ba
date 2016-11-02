@@ -30,7 +30,7 @@ def execute_read_query(queryText):
     
 ################################################################################
 scriptsDir =  r"C:\fiddle\VIIRS\viirs_ba\scripts"
-outputDir = r"C:\fiddle\VIIRS\Outputs"
+outputDir = r"M:\tmp\4Carl\VIIRS\Outputs"
 iniFile = "operatinalVIIRS.ini"   
 DBname = "VIIRS_burned_area"
 DBuser = "postgres"
